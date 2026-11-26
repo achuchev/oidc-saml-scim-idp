@@ -59,17 +59,34 @@ function env_string(array $names): ?string
  * file is missing, unreadable, does not return an array or fails to load. The file
  * is required once per request (static cache). Never echoes, exits or throws: any
  * output the file produces is discarded and load errors are logged.
+ *
+ * $loadError (optional) is set on every call, also when the result comes from the
+ * cache, to why an existing config.php was ignored: "unreadable" (the PHP process
+ * cannot read it), "exception" (loading it threw, for example a syntax error) or
+ * "not_array" (it did not return an array). It is null when the file loaded or does
+ * not exist. The IP allowlist reads it (src/ip_allowlist.php), so that a config.php
+ * that sets ip_allowlist but stops loading refuses every request instead of turning
+ * the check off.
  */
-function local_config(): array
+function local_config(?string &$loadError = null): array
 {
     static $config = null;
+    static $error = null;
     if (is_array($config)) {
+        $loadError = $error;
         return $config;
     }
     // Set before loading, so a config.php that calls back into these helpers gets [].
     $config = [];
     $file = dirname(__DIR__) . DIRECTORY_SEPARATOR . "config.php";
-    if (!is_file($file) || !is_readable($file)) {
+    if (!is_file($file)) {
+        $loadError = $error;
+        return $config;
+    }
+    if (!is_readable($file)) {
+        $error = "unreadable";
+        error_log("config.php ignored: it is not readable by the PHP process");
+        $loadError = $error;
         return $config;
     }
     // Require the file in its own scope, so variables it assigns cannot clobber this
@@ -85,8 +102,13 @@ function local_config(): array
         $loaded = $load($file);
         if (is_array($loaded)) {
             $config = $loaded;
+        } else {
+            // Also a file without a return statement (require gives 1) or "return 1;".
+            $error = "not_array";
+            error_log("config.php ignored: it must return an array (return [ ... ];)");
         }
     } catch (Throwable $e) {
+        $error = "exception";
         // Class and line only: a parse error message can quote configuration values.
         error_log(sprintf(
             "config.php ignored: %s on line %d (check it with php -l)",
@@ -101,6 +123,7 @@ function local_config(): array
             }
         }
     }
+    $loadError = $error;
     return $config;
 }
 
@@ -806,6 +829,26 @@ function bootstrap_plain_response(int $code, string $text): never
     }
     echo $text . "\n";
     exit();
+}
+
+/**
+ * Answers a request that Apache's ErrorDocument (htaccess.example, section 0) sent to index.php
+ * with the original error status, before it is routed: such a request arrives as a GET of the
+ * original URL (REDIRECT_STATUS 4xx/5xx), so routing it would run a different request than the
+ * client sent. Runs after the IP allowlist check, which answers refused addresses itself.
+ * REDIRECT_STATUS is set by the server, never from a request header; 200 is a normal rewrite.
+ */
+function bootstrap_error_document_passthrough(): void
+{
+    $status = $_SERVER["REDIRECT_STATUS"] ?? null;
+    if (PHP_SAPI === "cli" || !is_string($status) || preg_match('/^[45]\d\d$/D', $status) !== 1) {
+        return;
+    }
+    $code = (int) $status;
+    bootstrap_plain_response(
+        $code,
+        [403 => "Forbidden", 404 => "Not found", 413 => "Request body too large"][$code] ?? "Request refused"
+    );
 }
 
 /**
@@ -2450,6 +2493,20 @@ $ROOT_DIR = dirname(__DIR__);
 
 // Optional local overrides (git-ignored, loaded once by local_config()). See config.example.php.
 $LOCAL_CONFIG = local_config();
+
+// ---------- IP allowlist (src/ip_allowlist.php) ----------
+// The first check that can answer a request. An address outside ip_allowlist (config.php or
+// OIDC_IP_ALLOWLIST) gets an empty 404 that is the same for every URL and method: before the
+// data-directory checks (their 500 names this product's settings), the 400, 403 and 421 answers
+// and the HTTPS redirect below, and before any session, cookie or header. Refused requests are
+// recorded in <data dir>/blocked_requests.sqlite (src/blocked_requests.php). Nothing happens
+// while ip_allowlist is empty; command-line runs are exempt.
+require_once __DIR__ . "/ip_allowlist.php";
+require_once __DIR__ . "/blocked_requests.php";
+ip_allowlist_enforce();
+// Apache's own 403/404/413 answers reach index.php through ErrorDocument, so the check above
+// answers them for refused addresses; everyone else gets the original status here.
+bootstrap_error_document_passthrough();
 
 $dataPaths = bootstrap_resolve_data_paths($ROOT_DIR);
 $CONFIG_DIR = $dataPaths["config_dir"];

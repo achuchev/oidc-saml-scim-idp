@@ -4,7 +4,7 @@
         "title": "Identity Cloud Management & Federation API",
         "version": "2.1.0",
         "summary": "Programmatic Administration API for Multi-Tenant OIDC 1.0, SAML 2.0 & macOS Touch ID Identity Providers",
-        "description": "REST API for programmatically provisioning and configuring Identity Providers, SAML 2.0 Service Providers (including inline SP Metadata XML import), OpenID Connect 1.0 Relying Parties, JWKS/X.509 signing keys, Shared Directory Users, and Workload JWTs.\n\n### Authentication for External API Clients\nCreate a scoped **Admin API Client** in the Console (**API Clients & OpenAPI**) to obtain a `client_id` (`iac_...`) and `api_token` / `client_secret` (`idp_adm_...`). External clients can authenticate using any of:\n1. **Bearer Token**: `Authorization: Bearer idp_adm_...` *(or `Authorization: ApiKey idp_adm_...`)*\n2. **API Key Header**: `X-API-Key: idp_adm_...`\n3. **HTTP Basic Auth**: `Authorization: Basic base64(client_id:client_secret)`\n4. **OAuth 2.0 Client Credentials**: Exchange `client_id` + `client_secret` at `POST /api/oauth2/token` (`grant_type=client_credentials`) for a short-lived `idp_at_...` Bearer token.\n\nAn Admin API Client (and its access tokens) stops working as soon as its owner is removed from the administrator list (`users.txt`). The former per-administrator legacy API key (`Authorization: ApiKey <key>` at `POST /api/token`) is retired: it is no longer returned by the console and is accepted only while the operator sets `OIDC_LEGACY_ADMIN_API_KEY=1` (`legacy_admin_api_key` in config.php).\n\nCredentials are verified before any rate limit applies, and only failures are counted, per client address: after 12 failed credential checks within 5 minutes (10 at `POST /api/oauth2/token`), further failures from that address get `429` for 5 minutes. A valid credential is never refused by this limit. A request with a console session and an `Authorization` header that is not an Admin API client credential (for example the Basic credentials of an authentication gate in front of the console) is authenticated by its session.\n\n### Console Sessions and SCIM Credentials\nThe Admin Console authenticates with its session cookie (`ConsoleSession`); state-changing requests made with the cookie also need the `X-CSRF-Token` header (`ConsoleCsrfToken`, the `csrfToken` value from `/api/me`). Managing Admin API Clients and reading the administrator audit log accept **only** a console session: API clients get `403`. The hosted SCIM 2.0 server (`/{idpId}/scim/v2`) accepts a SCIM token (`idp_scim_...`) or an Admin API Client token (`idp_adm_...` / `idp_at_...`) that can access the provider and has `user_scope` `read` (`write` for changes), sent as `Authorization: Bearer` or `X-API-Key`; HTTP Basic and `Authorization: ApiKey` are not accepted there.\n\n### Provider-Level Scoping\nEach Admin API Client can be restricted to **one or more specific providers** (`provider_scope: \"selected\"`, `allowed_provider_ids: [...]`) or granted access to **all providers** (`provider_scope: \"all\"`), with independent read/write controls and optional `can_create_providers` auto-granting.\n\n### Directory Access and Capabilities\n`user_scope` governs everything that reads or changes the shared directory: `/api/users`, `/api/groups`, passkey deletion, and SCIM tokens and connectors (listing needs `read`; creating, changing, deleting, testing or syncing needs `write`). A SCIM token can never carry more access than its creator's `user_scope`. Password-pushing SCIM connectors can only be created or changed from the console (unless the operator sets `OIDC_ALLOW_API_CLIENT_PASSWORD_PUSH=1`). Minting JWTs at `POST /api/token`, importing private signing keys (`keyMode: \"paste\"`), and creating, changing or rotating the secret of an OIDC client that can use the `client_credentials` grant (its tokens carry its `client_id` as their subject) require the `can_mint_tokens` capability, which an administrator grants per client. Clients created before the capability existed do not have it (the operator can restore the old rule, under which provider `write` permission was enough, with `OIDC_LEGACY_API_CLIENT_TOKEN_MINTING=1`).\n\n### Durations\nDuration fields (`keyTtl`, `ttl`, `retention`, `leadTime`, `expires_in`, ...) take a number of seconds (`3600`) or a duration such as `90min`, `1h`, `2h30m`, `1 day` or `1w`. Values that cannot be parsed are rejected with `400`; nothing is silently replaced or clamped."
+        "description": "REST API for programmatically provisioning and configuring Identity Providers, SAML 2.0 Service Providers (including inline SP Metadata XML import), OpenID Connect 1.0 Relying Parties, JWKS/X.509 signing keys, Shared Directory Users, and Workload JWTs.\n\n### Authentication for External API Clients\nCreate a scoped **Admin API Client** in the Console (**API Clients & OpenAPI**) to obtain a `client_id` (`iac_...`) and `api_token` / `client_secret` (`idp_adm_...`). External clients can authenticate using any of:\n1. **Bearer Token**: `Authorization: Bearer idp_adm_...` *(or `Authorization: ApiKey idp_adm_...`)*\n2. **API Key Header**: `X-API-Key: idp_adm_...`\n3. **HTTP Basic Auth**: `Authorization: Basic base64(client_id:client_secret)`\n4. **OAuth 2.0 Client Credentials**: Exchange `client_id` + `client_secret` at `POST /api/oauth2/token` (`grant_type=client_credentials`) for a short-lived `idp_at_...` Bearer token.\n\nAn Admin API Client (and its access tokens) stops working as soon as its owner is removed from the administrator list (`users.txt`). The former per-administrator legacy API key (`Authorization: ApiKey <key>` at `POST /api/token`) is retired: it is no longer returned by the console and is accepted only while the operator sets `OIDC_LEGACY_ADMIN_API_KEY=1` (`legacy_admin_api_key` in config.php).\n\nCredentials are verified before any rate limit applies, and only failures are counted, per client address: after 12 failed credential checks within 5 minutes (10 at `POST /api/oauth2/token`), further failures from that address get `429` for 5 minutes. A valid credential is never refused by this limit. A request with a console session and an `Authorization` header that is not an Admin API client credential (for example the Basic credentials of an authentication gate in front of the console) is authenticated by its session.\n\n### Console Sessions and SCIM Credentials\nThe Admin Console authenticates with its session cookie (`ConsoleSession`); state-changing requests made with the cookie also need the `X-CSRF-Token` header (`ConsoleCsrfToken`, the `csrfToken` value from `/api/me`). Managing Admin API Clients, reading the administrator audit log, and the IP allowlist status and blocked-request log accept **only** a console session: API clients get `403`. The hosted SCIM 2.0 server (`/{idpId}/scim/v2`) accepts a SCIM token (`idp_scim_...`) or an Admin API Client token (`idp_adm_...` / `idp_at_...`) that can access the provider and has `user_scope` `read` (`write` for changes), sent as `Authorization: Bearer` or `X-API-Key`; HTTP Basic and `Authorization: ApiKey` are not accepted there.\n\n### Provider-Level Scoping\nEach Admin API Client can be restricted to **one or more specific providers** (`provider_scope: \"selected\"`, `allowed_provider_ids: [...]`) or granted access to **all providers** (`provider_scope: \"all\"`), with independent read/write controls and optional `can_create_providers` auto-granting.\n\n### Directory Access and Capabilities\n`user_scope` governs everything that reads or changes the shared directory: `/api/users`, `/api/groups`, passkey deletion, and SCIM tokens and connectors (listing needs `read`; creating, changing, deleting, testing or syncing needs `write`). A SCIM token can never carry more access than its creator's `user_scope`. Password-pushing SCIM connectors can only be created or changed from the console (unless the operator sets `OIDC_ALLOW_API_CLIENT_PASSWORD_PUSH=1`). Minting JWTs at `POST /api/token`, importing private signing keys (`keyMode: \"paste\"`), and creating, changing or rotating the secret of an OIDC client that can use the `client_credentials` grant (its tokens carry its `client_id` as their subject) require the `can_mint_tokens` capability, which an administrator grants per client. Clients created before the capability existed do not have it (the operator can restore the old rule, under which provider `write` permission was enough, with `OIDC_LEGACY_API_CLIENT_TOKEN_MINTING=1`).\n\n### Durations\nDuration fields (`keyTtl`, `ttl`, `retention`, `leadTime`, `expires_in`, ...) take a number of seconds (`3600`) or a duration such as `90min`, `1h`, `2h30m`, `1 day` or `1w`. Values that cannot be parsed are rejected with `400`; nothing is silently replaced or clamped."
     },
     "servers": [
         {
@@ -44,6 +44,10 @@
         {
             "name": "Audit Logs & Workload JWTs",
             "description": "Query per-provider SSO audit events and mint headless machine/Kubernetes JWTs."
+        },
+        {
+            "name": "IP Allowlist",
+            "description": "The operator's IP allowlist (set in config.php or the environment; read-only here) and the requests it refused. Console session only, and only the administrators in ip_allowlist_admins when the operator sets it. Clients outside the allowlist get an empty 404 from every URL."
         },
         {
             "name": "SCIM 2.0 Provisioning",
@@ -950,6 +954,341 @@
                     },
                     "403": {
                         "$ref": "#/components/responses/ConsoleSessionRequired"
+                    }
+                }
+            }
+        },
+        "/api/ip-allowlist": {
+            "get": {
+                "tags": [
+                    "IP Allowlist"
+                ],
+                "summary": "Get the IP Allowlist Status",
+                "description": "Console session only, and only for the administrators in `ip_allowlist_admins` when the operator sets it (by default every console administrator). The IP allowlist as the server applies it: its `state` (`disabled`, `active`, or `deny_all` when every request is refused), whether it is enforcing or report-only, where it is set (`source`) and whether config.php loads; the usable ranges with their labels, and the entries it ignores (`problems`); the caller's own address and the decision the allowlist makes for it (`viewer`, with an entry that would allow it); configuration `warnings`; `trusted_proxies`; and the size and retention of the blocked-request log (entries past the retention period are deleted when this is read). No filesystem path is returned.\n\nRanges are never set through the API: only in config.php (`ip_allowlist`) or the `OIDC_IP_ALLOWLIST` environment variable.",
+                "security": [
+                    {
+                        "ConsoleSession": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "IP allowlist status",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/IpAllowlistStatus"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    },
+                    "403": {
+                        "description": "Admin API clients and administrators not listed in ip_allowlist_admins",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/api/ip-allowlist/blocked-requests": {
+            "get": {
+                "tags": [
+                    "IP Allowlist"
+                ],
+                "summary": "List or Export Blocked Requests",
+                "description": "Console session only, and only for the administrators in `ip_allowlist_admins` when the operator sets it. The requests the IP allowlist refused and, in report-only mode, those it would have refused (`enforced: false`). Each entry covers one client address (an IPv6 /64), reason, report-only state and hour: the number of requests (`hits`), the first and the last request (method and path), and the Host header and user agent of the last one, plus, behind a trusted proxy, its address and the X-Forwarded-For header. Query strings, request bodies, cookies and other headers are never stored.\n\nJSON answers one page, newest entry first: `total` counts every entry that matches the filters, and `next_cursor`, sent back as `cursor`, fetches the next page. `format=csv` downloads every matching entry instead (`limit` and `cursor` do not apply), newest first and at most the newest 100000, as the attachment `blocked-requests-<UTC time>.csv`; cells that start with `=`, `+`, `-`, `@`, a tab or a carriage return get a leading `'`, so spreadsheets do not run them as formulas. Every export is recorded in the administrator audit log (`ip_allowlist.log_exported`).\n\nEntries whose last request is older than `ip_allowlist_log_retention_days` (default 30) are deleted, and the log never grows past `ip_allowlist_log_max_mb` (default 32 MiB): when it is full, the oldest entries make room.",
+                "security": [
+                    {
+                        "ConsoleSession": []
+                    }
+                ],
+                "parameters": [
+                    {
+                        "name": "ip",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "string",
+                            "example": "203.0.113.0/24"
+                        },
+                        "description": "An IPv4 or IPv6 address or CIDR block: entries whose address is inside it. IPv6 is matched per /64 (entries are kept per /64), so an IPv6 address or a prefix longer than /64 matches its whole /64."
+                    },
+                    {
+                        "name": "since",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "string",
+                            "example": "2026-11-26T09:00:00Z"
+                        },
+                        "description": "Entries whose last request is at or after this time: an ISO 8601 date or date-time (UTC unless it has an offset), or Unix seconds."
+                    },
+                    {
+                        "name": "until",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "string",
+                            "example": "2026-11-26T18:00:00Z"
+                        },
+                        "description": "Entries whose first request is at or before this time, in the formats of `since`."
+                    },
+                    {
+                        "name": "reason",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "string",
+                            "enum": [
+                                "not_listed",
+                                "bad_forwarded_for",
+                                "unknown_address",
+                                "config_error",
+                                "check_failed"
+                            ]
+                        },
+                        "description": "`not_listed`: the address is outside every range; `bad_forwarded_for`: a trusted proxy sent a malformed X-Forwarded-For header (or more than 32 hops or 4096 bytes); `unknown_address`: the connection's address (REMOTE_ADDR) is not an IP address; `config_error`: no entry is usable, or config.php sets `ip_allowlist` but does not load; `check_failed`: the check itself failed."
+                    },
+                    {
+                        "name": "enforced",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "string",
+                            "enum": [
+                                "0",
+                                "1"
+                            ]
+                        },
+                        "description": "`1`: refused requests; `0`: report-only entries (requests that were served and would have been refused)."
+                    },
+                    {
+                        "name": "limit",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "integer",
+                            "default": 100,
+                            "minimum": 1,
+                            "maximum": 500
+                        },
+                        "description": "Entries per page (JSON only)."
+                    },
+                    {
+                        "name": "cursor",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "The `next_cursor` of the previous page (JSON only)."
+                    },
+                    {
+                        "name": "format",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "string",
+                            "enum": [
+                                "json",
+                                "csv"
+                            ],
+                            "default": "json"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "One page of entries, newest first, or with `format=csv` every matching entry as a CSV attachment",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "entries": {
+                                            "type": "array",
+                                            "items": {
+                                                "$ref": "#/components/schemas/BlockedRequestEntry"
+                                            }
+                                        },
+                                        "next_cursor": {
+                                            "type": [
+                                                "string",
+                                                "null"
+                                            ],
+                                            "example": "1233",
+                                            "description": "Send as `cursor` for the next page; `null` on the last page"
+                                        },
+                                        "total": {
+                                            "type": "integer",
+                                            "example": 1234,
+                                            "description": "Entries that match the filters"
+                                        }
+                                    }
+                                }
+                            },
+                            "text/csv": {
+                                "schema": {
+                                    "type": "string",
+                                    "description": "UTF-8 CSV with the header row `id,hour_start_utc,first_seen_utc,last_seen_utc,hits,address,address_key,peer_address,forwarded_for,reason,enforced,first_method,first_path,last_method,last_path,host,user_agent`; times are UTC and `enforced` is `1` or `0`."
+                                }
+                            }
+                        }
+                    },
+                    "400": {
+                        "$ref": "#/components/responses/BadRequest"
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    },
+                    "403": {
+                        "description": "Admin API clients and administrators not listed in ip_allowlist_admins",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "The blocked-request log is unavailable",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "delete": {
+                "tags": [
+                    "IP Allowlist"
+                ],
+                "summary": "Purge Blocked Requests",
+                "description": "Console session only, and only for the administrators in `ip_allowlist_admins` when the operator sets it. Needs the current `password` of the signed-in administrator, so a borrowed session cannot wipe the record (`403` when it is wrong, `429` after 5 wrong passwords within 15 minutes). Send exactly one of `all: true`, which deletes every entry, or at least one filter (`ip`, `since`, `until`, `reason`, `enforced`, as for `GET`), which deletes the matching entries; both or neither answer `400`. Audited as `ip_allowlist.log_purged`, with the scope, the filters and the number of entries deleted.",
+                "security": [
+                    {
+                        "ConsoleSession": [],
+                        "ConsoleCsrfToken": []
+                    }
+                ],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "required": [
+                                    "password"
+                                ],
+                                "properties": {
+                                    "password": {
+                                        "type": "string",
+                                        "writeOnly": true,
+                                        "description": "Current console password of the signed-in administrator"
+                                    },
+                                    "all": {
+                                        "type": "boolean",
+                                        "description": "`true` deletes every entry; send no filter with it"
+                                    },
+                                    "ip": {
+                                        "type": "string",
+                                        "example": "203.0.113.0/24",
+                                        "description": "Entries of this IPv4 or IPv6 address or CIDR block (IPv6 per /64)"
+                                    },
+                                    "since": {
+                                        "type": [
+                                            "string",
+                                            "integer"
+                                        ],
+                                        "description": "Entries whose last request is at or after this time: an ISO 8601 date or date-time, or Unix seconds"
+                                    },
+                                    "until": {
+                                        "type": [
+                                            "string",
+                                            "integer"
+                                        ],
+                                        "description": "Entries whose first request is at or before this time, in the formats of `since`"
+                                    },
+                                    "reason": {
+                                        "type": "string",
+                                        "enum": [
+                                            "not_listed",
+                                            "bad_forwarded_for",
+                                            "unknown_address",
+                                            "config_error",
+                                            "check_failed"
+                                        ]
+                                    },
+                                    "enforced": {
+                                        "type": [
+                                            "boolean",
+                                            "integer",
+                                            "string"
+                                        ],
+                                        "description": "`true` (also `1`, `\"1\"`, `\"true\"`): refused requests; `false` (also `0`, `\"0\"`, `\"false\"`): report-only entries"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "The entries are deleted",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "deleted": {
+                                            "type": "integer",
+                                            "example": 1234,
+                                            "description": "Number of entries deleted"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "400": {
+                        "$ref": "#/components/responses/BadRequest"
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    },
+                    "403": {
+                        "description": "Wrong password, missing or wrong CSRF token, cross-origin request, Admin API client, or an administrator not listed in ip_allowlist_admins",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Too many wrong passwords"
+                    },
+                    "503": {
+                        "description": "The blocked-request log is unavailable",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -3226,7 +3565,7 @@
                 "type": "apiKey",
                 "in": "cookie",
                 "name": "__Host-IDPSESSID",
-                "description": "Interactive Admin Console session, created by signing in to the console (`__Host-IDPSESSID` over https, `IDPSESSID` over plain http). Browsers send it automatically on same-origin requests; scripts cannot set it. Requests that change state also need `ConsoleCsrfToken`. Required (and the only accepted credential) for Admin API Client management and the administrator audit log."
+                "description": "Interactive Admin Console session, created by signing in to the console (`__Host-IDPSESSID` over https, `IDPSESSID` over plain http). Browsers send it automatically on same-origin requests; scripts cannot set it. Requests that change state also need `ConsoleCsrfToken`. Required (and the only accepted credential) for Admin API Client management, the administrator audit log, and the IP allowlist status and blocked-request log."
             },
             "ConsoleCsrfToken": {
                 "type": "apiKey",
@@ -3459,6 +3798,362 @@
                             "untrusted"
                         ],
                         "description": "Retention class (see `GET /api/admin-audit-logs`)"
+                    }
+                }
+            },
+            "IpAllowlistStatus": {
+                "type": "object",
+                "description": "The IP allowlist as the server applies it",
+                "properties": {
+                    "state": {
+                        "type": "string",
+                        "enum": [
+                            "disabled",
+                            "active",
+                            "deny_all"
+                        ],
+                        "example": "active",
+                        "description": "`disabled`: no entry is set and every address is served; `active`: only addresses inside `ranges` are served; `deny_all`: every request is refused, because no entry is usable or because config.php sets `ip_allowlist` but does not load"
+                    },
+                    "enforcing": {
+                        "type": "boolean",
+                        "description": "Requests are refused: `state` is not `disabled` and report-only is off"
+                    },
+                    "report_only": {
+                        "type": "boolean",
+                        "description": "`ip_allowlist_report_only`: nothing is refused, and the requests that would be are recorded with `enforced: false`"
+                    },
+                    "source": {
+                        "type": "string",
+                        "enum": [
+                            "none",
+                            "env",
+                            "config"
+                        ],
+                        "description": "Where the list is set: the `OIDC_IP_ALLOWLIST` environment variable (it replaces the config.php list) or config.php; `none` when neither applies, always so when `state` is `disabled`, and when config.php sets `ip_allowlist` but does not load"
+                    },
+                    "config_php": {
+                        "type": "string",
+                        "enum": [
+                            "absent",
+                            "loaded",
+                            "unreadable",
+                            "failed"
+                        ],
+                        "description": "Whether config.php exists and loads; while it is `unreadable` or `failed`, none of its settings apply"
+                    },
+                    "ranges": {
+                        "type": "array",
+                        "description": "The usable entries",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "label": {
+                                    "type": "string",
+                                    "example": "Office",
+                                    "description": "Name given in config.php; empty when none"
+                                },
+                                "entry": {
+                                    "type": "string",
+                                    "example": "203.0.113.0/24",
+                                    "description": "The entry as written"
+                                },
+                                "cidr": {
+                                    "type": "string",
+                                    "example": "203.0.113.0/24",
+                                    "description": "The block it matches, in canonical form"
+                                },
+                                "family": {
+                                    "type": "integer",
+                                    "enum": [
+                                        4,
+                                        6
+                                    ]
+                                },
+                                "prefix": {
+                                    "type": "integer",
+                                    "example": 24
+                                },
+                                "notes": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    },
+                                    "description": "For example that host bits were set, or that the block matches every address"
+                                }
+                            }
+                        }
+                    },
+                    "problems": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "description": "Entries that are ignored and why, or why every request is refused"
+                    },
+                    "warnings": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "code": {
+                                    "type": "string",
+                                    "example": "no_ipv6_range",
+                                    "description": "One of `config_php_unusable`, `config_problems`, `viewer_not_allowed`, `trusted_proxy_any`, `trusted_proxy_invalid`, `forwarded_for_ignored`, `forwarded_for_missing`, `proxy_address_listed`, `everything_range`, `no_ipv6_range`, `no_ipv4_range`, `report_only`, `htaccess_outdated`, `php_display_errors`, `log_disabled` and `log_unavailable`; more may be added"
+                                },
+                                "level": {
+                                    "type": "string",
+                                    "enum": [
+                                        "error",
+                                        "warning",
+                                        "info"
+                                    ]
+                                },
+                                "message": {
+                                    "type": "string"
+                                }
+                            }
+                        }
+                    },
+                    "viewer": {
+                        "type": "object",
+                        "description": "The caller's own request as the allowlist sees it, with the decision the server makes for it",
+                        "properties": {
+                            "ip": {
+                                "type": [
+                                    "string",
+                                    "null"
+                                ],
+                                "example": "203.0.113.7",
+                                "description": "The client address the allowlist checks; `null` when it cannot be determined (`problem`)"
+                            },
+                            "peer": {
+                                "type": "string",
+                                "example": "203.0.113.7",
+                                "description": "The address the connection came from (REMOTE_ADDR)"
+                            },
+                            "via_proxy": {
+                                "type": "boolean",
+                                "description": "`ip` comes from the X-Forwarded-For header of a trusted proxy"
+                            },
+                            "problem": {
+                                "type": [
+                                    "string",
+                                    "null"
+                                ],
+                                "enum": [
+                                    "unknown_address",
+                                    "bad_forwarded_for",
+                                    null
+                                ],
+                                "description": "Why there is no client address (see `reason` of `BlockedRequestEntry`)"
+                            },
+                            "decision": {
+                                "type": "string",
+                                "enum": [
+                                    "disabled",
+                                    "allowed",
+                                    "refused"
+                                ],
+                                "description": "`refused` in report-only mode: the caller would be refused once report-only is off"
+                            },
+                            "reason": {
+                                "type": [
+                                    "string",
+                                    "null"
+                                ],
+                                "enum": [
+                                    "not_listed",
+                                    "bad_forwarded_for",
+                                    "unknown_address",
+                                    "config_error",
+                                    "check_failed",
+                                    null
+                                ],
+                                "description": "Why the caller is, or would be, refused"
+                            },
+                            "matched": {
+                                "type": [
+                                    "object",
+                                    "null"
+                                ],
+                                "description": "The range that allows the caller",
+                                "properties": {
+                                    "label": {
+                                        "type": "string",
+                                        "example": "Office"
+                                    },
+                                    "cidr": {
+                                        "type": "string",
+                                        "example": "203.0.113.0/24"
+                                    }
+                                }
+                            },
+                            "suggested_entry": {
+                                "type": [
+                                    "string",
+                                    "null"
+                                ],
+                                "example": "203.0.113.7/32",
+                                "description": "An entry that would allow the caller: its IPv4 address as a /32, or the /64 of its IPv6 address; `null` without `ip`"
+                            }
+                        }
+                    },
+                    "trusted_proxies": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "example": [
+                            "10.0.0.5"
+                        ],
+                        "description": "The configured `trusted_proxies` entries: X-Forwarded-For is read only from these, and the allowlist ignores entries that cover every address (`/0`)"
+                    },
+                    "log": {
+                        "$ref": "#/components/schemas/BlockedRequestsLog"
+                    }
+                }
+            },
+            "BlockedRequestsLog": {
+                "type": "object",
+                "description": "The blocked-request log (`blocked_requests.sqlite` in the data directory)",
+                "properties": {
+                    "enabled": {
+                        "type": "boolean",
+                        "description": "Refused requests are recorded (`ip_allowlist_log`)"
+                    },
+                    "available": {
+                        "type": "boolean",
+                        "description": "`false` when the data directory or the file is not writable, or the file cannot be read (details in the PHP error log)"
+                    },
+                    "file_name": {
+                        "type": "string",
+                        "example": "blocked_requests.sqlite"
+                    },
+                    "size_bytes": {
+                        "type": "integer",
+                        "example": 1048576,
+                        "description": "Size of the file and its write-ahead log"
+                    },
+                    "max_bytes": {
+                        "type": "integer",
+                        "example": 33554432,
+                        "description": "Size cap (`ip_allowlist_log_max_mb`): when it is reached, the oldest entries make room"
+                    },
+                    "retention_days": {
+                        "type": "integer",
+                        "example": 30,
+                        "description": "Entries whose last request is older are deleted (`ip_allowlist_log_retention_days`)"
+                    },
+                    "rows": {
+                        "type": "integer",
+                        "example": 1234,
+                        "description": "Number of entries"
+                    },
+                    "hits": {
+                        "type": "integer",
+                        "example": 5678,
+                        "description": "Number of requests the entries count"
+                    },
+                    "oldest": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "format": "date-time",
+                        "description": "First request of the oldest entry; `null` when the log is empty"
+                    },
+                    "newest": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "format": "date-time",
+                        "description": "Last request of the newest entry; `null` when the log is empty"
+                    }
+                }
+            },
+            "BlockedRequestEntry": {
+                "type": "object",
+                "description": "The refused requests of one client address (an IPv6 /64), with one reason and report-only state, in one hour",
+                "properties": {
+                    "id": {
+                        "type": "integer",
+                        "example": 1234
+                    },
+                    "hour_start": {
+                        "type": "string",
+                        "format": "date-time",
+                        "example": "2026-11-26T09:00:00Z",
+                        "description": "Start of the hour (UTC)"
+                    },
+                    "address": {
+                        "type": "string",
+                        "example": "192.0.2.10",
+                        "description": "Client address of the last request; empty when unknown"
+                    },
+                    "address_key": {
+                        "type": "string",
+                        "example": "192.0.2.10",
+                        "description": "What the entry groups by: the IPv4 address, `<network>/64` for IPv6, or `unknown`"
+                    },
+                    "peer_address": {
+                        "type": "string",
+                        "description": "The connection's address (REMOTE_ADDR) of the last request when it was not the client: a trusted proxy whose X-Forwarded-For header named the client (or was malformed), or a value that is not an IP address; else empty"
+                    },
+                    "forwarded_for": {
+                        "type": "string",
+                        "description": "X-Forwarded-For header of the last request (at most 200 characters) when the client address came from it, or when it was refused as `bad_forwarded_for`; else empty"
+                    },
+                    "reason": {
+                        "type": "string",
+                        "enum": [
+                            "not_listed",
+                            "bad_forwarded_for",
+                            "unknown_address",
+                            "config_error",
+                            "check_failed"
+                        ],
+                        "description": "`not_listed`: the address is outside every range; `bad_forwarded_for`: a trusted proxy sent a malformed X-Forwarded-For header (or more than 32 hops or 4096 bytes); `unknown_address`: the connection's address (REMOTE_ADDR) is not an IP address; `config_error`: no entry is usable, or config.php sets `ip_allowlist` but does not load; `check_failed`: the check itself failed"
+                    },
+                    "enforced": {
+                        "type": "boolean",
+                        "description": "`false`: report-only, the requests were served"
+                    },
+                    "hits": {
+                        "type": "integer",
+                        "example": 812,
+                        "description": "Number of requests"
+                    },
+                    "first_seen": {
+                        "type": "string",
+                        "format": "date-time",
+                        "example": "2026-11-26T09:01:12Z"
+                    },
+                    "last_seen": {
+                        "type": "string",
+                        "format": "date-time",
+                        "example": "2026-11-26T09:58:40Z"
+                    },
+                    "first_request": {
+                        "type": "string",
+                        "example": "GET /",
+                        "description": "Method and path of the first request (never the query string)"
+                    },
+                    "last_request": {
+                        "type": "string",
+                        "example": "GET /.env",
+                        "description": "Method and path of the last request"
+                    },
+                    "host": {
+                        "type": "string",
+                        "example": "203.0.113.5",
+                        "description": "Host header of the last request"
+                    },
+                    "user_agent": {
+                        "type": "string",
+                        "example": "zgrab/0.x",
+                        "description": "User-Agent header of the last request"
                     }
                 }
             },

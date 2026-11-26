@@ -289,6 +289,11 @@ function apiFetch(path, opts = {}) {
       if (j && typeof j.csrfToken === 'string' && j.csrfToken) {
         window.__CSRF_TOKEN__ = j.csrfToken;
       }
+      // Every real API 404 has a JSON body; an empty one is the IP allowlist's refusal
+      // (src/ip_allowlist.php), which is the same for every URL and says nothing else.
+      if (r.status === 404 && text === '' && /(^|\/)api\//.test(path)) {
+        j = { error: 'No answer from the server (empty 404). If your network address changed (VPN, Wi-Fi, mobile), it may be outside this IdP\'s IP allowlist: reconnect from an allowed network and reload.' };
+      }
       if (!j || typeof j !== 'object' || Array.isArray(j)) {
         j = r.ok ? {} : { error: `Request failed (HTTP ${r.status}${r.statusText ? ' ' + r.statusText : ''})` };
       }
@@ -4594,6 +4599,671 @@ function AdminAuditLogPanel({ onNotify }) {
   );
 }
 
+/* ==================== BLOCKED REQUESTS (IP ALLOWLIST) ==================== */
+// The operator's IP allowlist (ip_allowlist in config.php or OIDC_IP_ALLOWLIST; this page only
+// reads it) and the requests it refused: GET /api/ip-allowlist, GET and DELETE
+// /api/ip-allowlist/blocked-requests. The logged values (addresses, paths, Host headers, user
+// agents) come from the refused clients: they are shown as text only, never as HTML or links.
+const BLOCKED_REASON_META = {
+  not_listed: { label: 'Not in allowlist', color: 'error' },
+  bad_forwarded_for: { label: 'Bad X-Forwarded-For', color: 'warning' },
+  unknown_address: { label: 'Unknown address', color: 'warning' },
+  config_error: { label: 'Configuration error', color: 'error' },
+  check_failed: { label: 'Check failed', color: 'error' },
+};
+
+const BLOCKED_PAGE_SIZE = 100;
+const BLOCKED_RANGES_SHOWN = 50;
+// The filters as entered: ip, since and until (datetime-local values in the browser's time
+// zone) and reason ('' for all, one of the reasons, or 'report_only').
+const BLOCKED_EMPTY_FILTERS = { ip: '', since: '', until: '', reason: '' };
+
+const BLOCKED_ADDRESS_BUTTON_SX = {
+  p: 0, m: 0, border: 0, bgcolor: 'transparent', cursor: 'pointer', textAlign: 'left',
+  fontSize: 12.5, fontWeight: 700, lineHeight: 1.5, color: 'primary.main', wordBreak: 'break-all',
+  '&:hover': { textDecoration: 'underline' },
+};
+
+// Server values as React text and shapes: null becomes '', and a value that is not the
+// expected object or list becomes an empty one, so an unexpected answer cannot break the page.
+function blockedText(v) {
+  return v === null || v === undefined ? '' : String(v);
+}
+
+function blockedObject(v) {
+  return v && typeof v === 'object' && !Array.isArray(v) ? v : {};
+}
+
+function blockedList(v) {
+  return Array.isArray(v) ? v : [];
+}
+
+function blockedEntries(v) {
+  return blockedList(v).filter(e => e && typeof e === 'object' && !Array.isArray(e));
+}
+
+function blockedCursor(v) {
+  const s = blockedText(v);
+  return /^\d{1,18}$/.test(s) ? s : null;
+}
+
+// The label and chip color of a reason; an unknown value is shown as it is.
+function blockedReasonMeta(reason) {
+  const key = blockedText(reason);
+  return Object.prototype.hasOwnProperty.call(BLOCKED_REASON_META, key)
+    ? BLOCKED_REASON_META[key]
+    : { label: key || 'unknown', color: 'default' };
+}
+
+function blockedReasonLabel(reason) {
+  return blockedReasonMeta(reason).label;
+}
+
+function blockedSeverity(level) {
+  return ['error', 'warning', 'info', 'success'].includes(level) ? level : 'info';
+}
+
+function blockedCount(n) {
+  const v = Number(n);
+  return Number.isFinite(v) ? v.toLocaleString() : '0';
+}
+
+function blockedFormatBytes(n) {
+  let v = Number(n);
+  if (!Number.isFinite(v) || v < 0) return '?';
+  if (v < 1024) return `${v} B`;
+  const units = ['KiB', 'MiB', 'GiB'];
+  let i = -1;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return `${v >= 10 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
+}
+
+// A datetime-local value (the browser's time zone) as ISO 8601 UTC: '' when empty, null when
+// it is not a date and time.
+function blockedLocalToIso(localValue) {
+  const v = String(localValue || '').trim();
+  if (!v) return '';
+  const d = new Date(v);
+  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+}
+
+// Query parameters for the applied filters f. The list, the CSV export and a filtered purge
+// all use them, so all three cover the same rows. "Report-only" sends enforced=0. A time that
+// does not parse is sent as typed: the server refuses it (400) instead of the filter being
+// dropped, which would widen an export or a purge.
+function blockedRequestsQuery(f) {
+  const q = new URLSearchParams();
+  const ip = String(f.ip || '').trim();
+  if (ip) q.set('ip', ip);
+  for (const key of ['since', 'until']) {
+    const typed = String(f[key] || '').trim();
+    if (typed) q.set(key, blockedLocalToIso(typed) || typed);
+  }
+  if (f.reason === 'report_only') q.set('enforced', '0');
+  else if (f.reason) q.set('reason', f.reason);
+  return q;
+}
+
+// The state chip of the status card. Report-only wins over the state: nothing is refused.
+function blockedStateMeta(status) {
+  if (status.state === 'disabled') return { label: 'Off', color: 'default', text: 'every address is served' };
+  if (status.report_only) return { label: 'Report-only', color: 'warning', text: 'nothing is refused; would-be refusals are listed' };
+  if (status.state === 'deny_all') return { label: 'Refusing every request', color: 'error', text: '' };
+  if (status.state === 'active') return { label: 'Enforcing', color: 'success', text: '' };
+  return { label: blockedText(status.state) || 'Unknown', color: 'default', text: '' };
+}
+
+function blockedSourceText(status) {
+  if (status.source === 'env') return 'Source: the OIDC_IP_ALLOWLIST environment variable, which replaces ip_allowlist in config.php (entries from it have no labels).';
+  if (status.source === 'config') return 'Source: ip_allowlist in config.php.';
+  if (status.state === 'deny_all') return 'Source: config.php, which does not load (see the problems below).';
+  return 'Source: none (ip_allowlist is empty or not set).';
+}
+
+// GET /api/ip-allowlist: the state, warnings, the viewer's own address and decision, the
+// ranges and the log size. Nothing here changes the configuration.
+function BlockedStatusCard({ status }) {
+  const [okEntry, copyEntry] = useCopyFeedback();
+  const [okSnippet, copySnippet] = useCopyFeedback();
+  const [allRanges, setAllRanges] = useState(false);
+  const meta = blockedStateMeta(status);
+  const viewer = blockedObject(status.viewer);
+  // The web answer always has the viewer section (the command line's has none).
+  const hasViewer = Object.keys(viewer).length > 0;
+  const matched = blockedObject(viewer.matched);
+  const log = blockedObject(status.log);
+  const ranges = blockedList(status.ranges);
+  const problems = blockedList(status.problems);
+  const warnings = blockedList(status.warnings);
+  const proxies = blockedList(status.trusted_proxies);
+  const viewerIp = blockedText(viewer.ip);
+  const viewerPeer = blockedText(viewer.peer);
+  const suggested = blockedText(viewer.suggested_entry);
+  // Report-only first, so that nothing is refused while the list is checked here.
+  const snippet = status.state === 'disabled' && suggested
+    ? '"ip_allowlist" => ["' + suggested + '" => "My address"], "ip_allowlist_report_only" => true,'
+    : '';
+  let decision = { text: 'The allowlist is off', color: 'text.secondary' };
+  if (viewer.decision === 'allowed') {
+    const label = blockedText(matched.label);
+    decision = { text: 'Allowed by ' + blockedText(matched.cidr) + (label ? ' (' + label + ')' : ''), color: 'success.main' };
+  } else if (viewer.decision === 'refused') {
+    decision = { text: 'Would be refused: ' + blockedReasonLabel(viewer.reason), color: 'error.main' };
+  }
+  const rows = Number(log.rows) || 0;
+  const hits = Number(log.hits) || 0;
+  const shownRanges = allRanges ? ranges : ranges.slice(0, BLOCKED_RANGES_SHOWN);
+  const headingSx = { fontWeight: 700, display: 'block', textTransform: 'uppercase', letterSpacing: '0.04em', mb: 0.5 };
+
+  return (
+    <Paper variant="outlined" sx={{ p: 3, mb: 3 }}>
+      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.25, flexWrap: 'wrap', mb: 2 }}>
+        <Typography variant="subtitle1" sx={{ fontWeight: 700, display: 'flex', alignItems: 'center', gap: 1 }}>
+          <Icon name="shield" size={20} />
+          IP Allowlist
+        </Typography>
+        <Chip size="small" color={meta.color} label={meta.label} sx={{ fontWeight: 700 }} />
+        {meta.text && <Typography variant="body2" color="text.secondary">{meta.text}</Typography>}
+      </Box>
+
+      {snippet && (
+        <Box sx={{ mb: 2 }}>
+          <Typography variant="body2" sx={{ mb: 0.75 }}>
+            To turn it on, add this to config.php. It starts in report-only mode: nothing is refused until ip_allowlist_report_only is removed.
+          </Typography>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, py: 1, px: 1.5, borderRadius: 2, bgcolor: 'action.hover', border: '1px solid', borderColor: 'divider' }}>
+            <Typography className="mono" sx={{ fontSize: 12.5, flex: 1, minWidth: 0, wordBreak: 'break-all' }}>{snippet}</Typography>
+            <Tooltip title={okSnippet ? 'Copied!' : 'Copy'}>
+              <IconButton size="small" onClick={() => copySnippet(snippet)} color={okSnippet ? 'success' : 'default'}>
+                <Icon name={okSnippet ? 'check' : 'content_copy'} size={16} />
+              </IconButton>
+            </Tooltip>
+          </Box>
+        </Box>
+      )}
+
+      {warnings.map((w, i) => {
+        const item = blockedObject(w);
+        return (
+          <Alert key={i} severity={blockedSeverity(item.level)} sx={{ mb: 1 }}>
+            {blockedText(item.message) || blockedText(item.code)}
+          </Alert>
+        );
+      })}
+
+      {hasViewer && (
+        <Box sx={{ mt: warnings.length ? 2 : 0, mb: 2.5 }}>
+          <Typography variant="caption" color="text.secondary" sx={headingSx}>Your address</Typography>
+          <Box sx={{ display: 'flex', alignItems: 'baseline', gap: 1, flexWrap: 'wrap' }}>
+            <Typography className="mono" sx={{ fontWeight: 700, fontSize: 14 }}>{viewerIp || 'Unknown'}</Typography>
+            {viewer.via_proxy === true && viewerPeer && (
+              <Typography variant="body2" color="text.secondary">via proxy <span className="mono">{viewerPeer}</span></Typography>
+            )}
+            {viewer.via_proxy !== true && !viewerIp && viewerPeer && (
+              <Typography variant="body2" color="text.secondary">connection from <span className="mono">{viewerPeer}</span></Typography>
+            )}
+          </Box>
+          <Typography variant="body2" sx={{ color: decision.color, fontWeight: 600, mt: 0.25 }}>{decision.text}</Typography>
+          {viewer.problem && viewer.decision !== 'refused' && (
+            <Typography variant="body2" color="warning.main" sx={{ mt: 0.25 }}>
+              Your address could not be determined ({blockedReasonLabel(viewer.problem)}): once the allowlist is on, requests like this one are refused.
+            </Typography>
+          )}
+          {suggested && (
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mt: 0.5, flexWrap: 'wrap' }}>
+              <Typography variant="body2" color="text.secondary">Suggested entry</Typography>
+              <Typography className="mono" sx={{ fontSize: 13, fontWeight: 600 }}>{suggested}</Typography>
+              <Tooltip title={okEntry ? 'Copied!' : 'Copy entry'}>
+                <IconButton size="small" onClick={() => copyEntry(suggested)} color={okEntry ? 'success' : 'default'}>
+                  <Icon name={okEntry ? 'check' : 'content_copy'} size={16} />
+                </IconButton>
+              </Tooltip>
+            </Box>
+          )}
+          {proxies.length > 0 && (
+            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
+              Trusted proxies: <span className="mono">{proxies.map(blockedText).join(', ')}</span>
+            </Typography>
+          )}
+        </Box>
+      )}
+
+      <Typography variant="caption" color="text.secondary" sx={headingSx}>Active ranges</Typography>
+      {ranges.length === 0 ? (
+        <Typography variant="body2" color="text.secondary">None.</Typography>
+      ) : (
+        <Box sx={{ overflowX: 'auto' }}>
+          <Table size="small">
+            <TableHead>
+              <TableRow>
+                <TableCell sx={{ fontWeight: 700 }}>Label</TableCell>
+                <TableCell sx={{ fontWeight: 700 }}>Entry</TableCell>
+                <TableCell sx={{ fontWeight: 700 }}>CIDR</TableCell>
+                <TableCell sx={{ fontWeight: 700 }}>Notes</TableCell>
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {shownRanges.map((r, i) => {
+                const range = blockedObject(r);
+                const notes = blockedList(range.notes).map(blockedText).join('; ');
+                return (
+                  <TableRow key={i}>
+                    <TableCell sx={{ fontSize: 12.5 }}>{blockedText(range.label) || '—'}</TableCell>
+                    <TableCell className="mono" sx={{ fontSize: 12, wordBreak: 'break-all' }}>{blockedText(range.entry)}</TableCell>
+                    <TableCell className="mono" sx={{ fontSize: 12, wordBreak: 'break-all' }}>{blockedText(range.cidr)}</TableCell>
+                    <TableCell sx={{ fontSize: 12, color: notes ? 'warning.main' : 'text.secondary' }}>{notes || '—'}</TableCell>
+                  </TableRow>
+                );
+              })}
+            </TableBody>
+          </Table>
+        </Box>
+      )}
+      {ranges.length > BLOCKED_RANGES_SHOWN && (
+        <Button size="small" sx={{ mt: 0.5 }} onClick={() => setAllRanges(!allRanges)}>
+          {allRanges ? 'Show fewer' : `Show all ${ranges.length} ranges`}
+        </Button>
+      )}
+      <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.75 }}>{blockedSourceText(status)}</Typography>
+
+      {problems.length > 0 && (
+        <Box sx={{ mt: 1.5 }}>
+          <Typography variant="body2" sx={{ fontWeight: 700, color: 'error.main' }}>Problems</Typography>
+          <Box component="ul" sx={{ m: 0, mt: 0.5, pl: 2.5 }}>
+            {problems.map((p, i) => <Typography key={i} component="li" variant="body2">{blockedText(p)}</Typography>)}
+          </Box>
+        </Box>
+      )}
+
+      <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>
+        <strong>Log</strong>
+        {log.file_name ? <> (<span className="mono">{blockedText(log.file_name)}</span>)</> : null}
+        {': '}{blockedCount(rows)} {rows === 1 ? 'row' : 'rows'}, {blockedCount(hits)} {hits === 1 ? 'request' : 'requests'}
+        {log.oldest ? <>, oldest <span className="mono" title={relativeTime(log.oldest)}>{blockedText(log.oldest)}</span></> : null}
+        {' · '}{blockedFormatBytes(log.size_bytes)} of {blockedFormatBytes(log.max_bytes)}
+        {' · '}kept {blockedText(log.retention_days)} {Number(log.retention_days) === 1 ? 'day' : 'days'}
+      </Typography>
+
+      <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1.5 }}>
+        Ranges are set in config.php (ip_allowlist) or the OIDC_IP_ALLOWLIST environment variable; this page cannot change them.
+      </Typography>
+    </Paper>
+  );
+}
+
+// One row of the log: an address (an IPv6 /64), a reason and an hour.
+function BlockedRequestRow({ entry, onFilterAddress }) {
+  const reason = blockedReasonMeta(entry.reason);
+  const key = blockedText(entry.address_key);
+  const address = blockedText(entry.address);
+  const peer = blockedText(entry.peer_address);
+  const forwardedFor = blockedText(entry.forwarded_for);
+  const firstRequest = blockedText(entry.first_request);
+  const lastRequest = blockedText(entry.last_request);
+  const userAgent = blockedText(entry.user_agent);
+  const small = { fontSize: 11.5, color: 'text.secondary' };
+  const chipSx = { height: 20, fontSize: 11, fontWeight: 700 };
+  return (
+    <TableRow hover>
+      <TableCell className="mono" sx={{ whiteSpace: 'nowrap', fontSize: 12 }} title={relativeTime(entry.hour_start)}>
+        {blockedText(entry.hour_start)}
+      </TableCell>
+      <TableCell sx={{ fontSize: 12.5 }}>
+        {key && key !== 'unknown' ? (
+          <Box component="button" type="button" className="mono" title="Show only this address" onClick={() => onFilterAddress(key)} sx={BLOCKED_ADDRESS_BUTTON_SX}>
+            {key}
+          </Box>
+        ) : (
+          <Box className="mono" sx={{ color: 'text.secondary' }}>{key || 'unknown'}</Box>
+        )}
+        {address && address !== key && <Box className="mono" sx={{ ...small, wordBreak: 'break-all' }}>{address}</Box>}
+        {peer && <Box sx={small}>via <span className="mono">{peer}</span></Box>}
+        {forwardedFor && (
+          <Box className="mono" title={'X-Forwarded-For: ' + forwardedFor} sx={{ ...small, fontSize: 11, maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            XFF: {forwardedFor}
+          </Box>
+        )}
+      </TableCell>
+      <TableCell align="right" sx={{ fontWeight: 700, fontSize: 12.5 }}>{blockedCount(entry.hits)}</TableCell>
+      <TableCell className="mono" sx={{ fontSize: 11.5, whiteSpace: 'nowrap' }}>
+        <Box title={relativeTime(entry.first_seen)}>{blockedText(entry.first_seen)}</Box>
+        <Box title={relativeTime(entry.last_seen)} sx={{ color: 'text.secondary' }}>{blockedText(entry.last_seen)}</Box>
+      </TableCell>
+      <TableCell className="mono" sx={{ fontSize: 11.5, minWidth: 160, maxWidth: 300, wordBreak: 'break-all' }}>
+        <Box>{firstRequest || '—'}</Box>
+        {lastRequest && lastRequest !== firstRequest && <Box sx={{ color: 'text.secondary' }}>{lastRequest}</Box>}
+      </TableCell>
+      <TableCell className="mono" sx={{ fontSize: 11.5, maxWidth: 180, wordBreak: 'break-all' }}>{blockedText(entry.host) || '—'}</TableCell>
+      <TableCell sx={{ fontSize: 11.5 }}>
+        <Box title={userAgent} sx={{ maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{userAgent || '—'}</Box>
+      </TableCell>
+      <TableCell>
+        <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap' }}>
+          <Chip size="small" color={reason.color} label={reason.label} sx={chipSx} />
+          {!entry.enforced && <Chip size="small" variant="outlined" color="warning" label="Report-only" sx={chipSx} />}
+        </Box>
+      </TableCell>
+    </TableRow>
+  );
+}
+
+// Deletes the log, or the rows the applied filters cover, after the administrator's current
+// password (DELETE /api/ip-allowlist/blocked-requests), so a borrowed session cannot wipe the
+// record. The server records it in the admin audit log (ip_allowlist.log_purged).
+function PurgeBlockedRequestsDialog({ open, onClose, filters, hasFilters, onDone }) {
+  const [scope, setScope] = useState('filtered');
+  const [password, setPassword] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+
+  useEffect(() => {
+    if (!open) return;
+    // The narrower choice is preselected when there is one.
+    setScope(hasFilters ? 'filtered' : 'all');
+    setPassword('');
+    setErr('');
+  }, [open]);
+
+  const all = !hasFilters || scope === 'all';
+  const summary = Object.entries(filters).map(([k, v]) => `${k}=${v}`).join(', ');
+
+  const submit = () => {
+    if (busy || !password) return;
+    setBusy(true);
+    setErr('');
+    const body = all ? { password, all: true } : { ...filters, password };
+    api('/api/ip-allowlist/blocked-requests', { method: 'DELETE', body: JSON.stringify(body) })
+      .then(r => {
+        setPassword('');
+        onDone(Number(r && r.deleted) || 0);
+      })
+      .catch(e => setErr(errText(e, 'Delete failed')))
+      .finally(() => setBusy(false));
+  };
+
+  return (
+    <Dialog open={open} onClose={busy ? undefined : onClose} maxWidth="sm" fullWidth>
+      <DialogTitle sx={{ display: 'flex', alignItems: 'center', gap: 1.25 }}>
+        <Icon name="delete_sweep" size={22} />
+        <span>Purge Blocked Requests</span>
+      </DialogTitle>
+      <DialogContent dividers>
+        {err && <Alert severity="error" sx={{ mb: 2 }}>{err}</Alert>}
+        <RadioGroup value={all ? 'all' : 'filtered'} onChange={e => setScope(e.target.value)} aria-label="Entries to delete">
+          <FormControlLabel value="filtered" disabled={!hasFilters || busy} control={<Radio size="small" />} label="Entries matching the current filters" />
+          {hasFilters && (
+            <Typography variant="caption" className="mono" color="text.secondary" sx={{ display: 'block', ml: 4, mt: -0.5, mb: 0.5, wordBreak: 'break-all' }}>
+              {summary}
+            </Typography>
+          )}
+          <FormControlLabel value="all" disabled={busy} control={<Radio size="small" />} label="All entries" />
+        </RadioGroup>
+        <TextField
+          fullWidth size="small" type="password" label="Current password" value={password}
+          onChange={e => setPassword(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') submit(); }}
+          autoComplete="current-password" autoFocus sx={{ mt: 2 }}
+        />
+        <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>
+          This cannot be undone. The deletion is recorded in the Admin Audit Log.
+        </Typography>
+      </DialogContent>
+      <DialogActions sx={{ px: 3, py: 2 }}>
+        <Button onClick={onClose} disabled={busy}>Cancel</Button>
+        <Button color="error" variant="contained" onClick={submit} disabled={busy || !password}>Delete</Button>
+      </DialogActions>
+    </Dialog>
+  );
+}
+
+function BlockedRequestsPanel({ onNotify }) {
+  const [status, setStatus] = useState(null);
+  const [statusErr, setStatusErr] = useState('');
+  const [entries, setEntries] = useState([]);
+  const [total, setTotal] = useState(0);
+  const [nextCursor, setNextCursor] = useState(null);
+  const [listErr, setListErr] = useState('');
+  const [loaded, setLoaded] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [draft, setDraft] = useState(BLOCKED_EMPTY_FILTERS);
+  const [applied, setApplied] = useState(BLOCKED_EMPTY_FILTERS);
+  const [filterErr, setFilterErr] = useState('');
+  const [purgeOpen, setPurgeOpen] = useState(false);
+  // Answers to superseded requests are dropped: a slow first page must not replace the one for
+  // newer filters, and "Load more" must not append rows of the previous filters.
+  const statusSeq = React.useRef(0);
+  const listSeq = React.useRef(0);
+
+  const loadStatus = () => {
+    const seq = ++statusSeq.current;
+    api('/api/ip-allowlist')
+      .then(r => {
+        if (seq !== statusSeq.current) return;
+        setStatus(blockedObject(r));
+        setStatusErr('');
+      })
+      .catch(e => {
+        if (seq !== statusSeq.current) return;
+        setStatus(null);
+        setStatusErr(errText(e, 'Failed to load the IP allowlist status'));
+      });
+  };
+
+  const pageUrl = (filters, cursor) => {
+    const q = blockedRequestsQuery(filters);
+    q.set('limit', String(BLOCKED_PAGE_SIZE));
+    if (cursor) q.set('cursor', cursor);
+    return '/api/ip-allowlist/blocked-requests?' + q.toString();
+  };
+
+  const loadList = (filters) => {
+    const seq = ++listSeq.current;
+    setLoadingMore(false);
+    api(pageUrl(filters, null))
+      .then(r => {
+        if (seq !== listSeq.current) return;
+        setEntries(blockedEntries(r.entries));
+        setNextCursor(blockedCursor(r.next_cursor));
+        setTotal(Number(r.total) || 0);
+        setListErr('');
+        setLoaded(true);
+      })
+      .catch(e => {
+        if (seq !== listSeq.current) return;
+        setEntries([]);
+        setNextCursor(null);
+        setTotal(0);
+        setListErr(errText(e, 'Failed to load the blocked requests'));
+        setLoaded(true);
+      });
+  };
+
+  const loadMore = () => {
+    if (!nextCursor || loadingMore) return;
+    const seq = listSeq.current;
+    setLoadingMore(true);
+    api(pageUrl(applied, nextCursor))
+      .then(r => {
+        if (seq !== listSeq.current) return;
+        const more = blockedEntries(r.entries);
+        setEntries(prev => {
+          const seen = new Set(prev.map(x => x.id));
+          return prev.concat(more.filter(x => !seen.has(x.id)));
+        });
+        setNextCursor(blockedCursor(r.next_cursor));
+        setTotal(Number(r.total) || 0);
+      })
+      .catch(e => {
+        if (seq === listSeq.current) onNotify(errText(e, 'Failed to load more blocked requests'), 'error');
+      })
+      .finally(() => {
+        if (seq === listSeq.current) setLoadingMore(false);
+      });
+  };
+
+  const refresh = () => {
+    loadStatus();
+    loadList(applied);
+  };
+  useEffect(() => { refresh(); }, []);
+
+  const runFilters = (next) => {
+    setFilterErr('');
+    setDraft(next);
+    setApplied(next);
+    loadList(next);
+  };
+
+  const apply = (e) => {
+    if (e && e.preventDefault) e.preventDefault();
+    for (const [key, label] of [['since', 'From'], ['until', 'To']]) {
+      if (blockedLocalToIso(draft[key]) === null) {
+        setFilterErr(`${label} is not a valid date and time.`);
+        return;
+      }
+    }
+    runFilters({ ...draft, ip: draft.ip.trim() });
+  };
+
+  const reset = () => runFilters(BLOCKED_EMPTY_FILTERS);
+
+  // An address in the table narrows the rows shown to it (an IPv6 address to its /64).
+  const filterAddress = (key) => runFilters({ ...applied, ip: key });
+
+  const purged = (n) => {
+    setPurgeOpen(false);
+    onNotify(`Deleted ${n} ${n === 1 ? 'entry' : 'entries'}`);
+    refresh();
+  };
+
+  // The export and a filtered purge cover exactly the rows the applied filters select.
+  const purgeFilters = Object.fromEntries(blockedRequestsQuery(applied).entries());
+  const hasFilters = Object.keys(purgeFilters).length > 0;
+  const csvQuery = blockedRequestsQuery(applied);
+  csvQuery.set('format', 'csv');
+  const csvHref = absUrl('/api/ip-allowlist/blocked-requests?' + csvQuery.toString());
+
+  return (
+    <Box className="fade-in">
+      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 2, mb: 3 }}>
+        <Box>
+          <Typography variant="h5" sx={{ fontWeight: 800 }}>Blocked Requests</Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+            Requests from addresses outside the IP allowlist. They were answered with an empty 404.
+          </Typography>
+        </Box>
+        <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
+          <Button variant="outlined" startIcon={<Icon name="refresh" size={18} />} onClick={refresh}>Refresh</Button>
+          <Button variant="outlined" startIcon={<Icon name="download" size={18} />} component="a" href={csvHref} download>
+            Export CSV
+          </Button>
+          <Button variant="outlined" color="error" startIcon={<Icon name="delete_sweep" size={18} />} onClick={() => setPurgeOpen(true)}>
+            Purge…
+          </Button>
+        </Box>
+      </Box>
+
+      {statusErr && <Alert severity="error" sx={{ mb: 3 }}>{statusErr}</Alert>}
+      {status && <BlockedStatusCard status={status} />}
+      {!status && !statusErr && (
+        <Paper variant="outlined" sx={{ p: 3, mb: 3 }}>
+          <Typography variant="body2" color="text.secondary">Loading the IP allowlist status…</Typography>
+        </Paper>
+      )}
+
+      <Paper variant="outlined" sx={{ p: 3 }}>
+        <Box component="form" onSubmit={apply} sx={{ display: 'flex', gap: 1.5, alignItems: 'center', flexWrap: 'wrap', mb: 2 }}>
+          <TextField
+            size="small" label="IP or CIDR" placeholder="203.0.113.7 or 203.0.113.0/24"
+            value={draft.ip} onChange={e => setDraft({ ...draft, ip: e.target.value })}
+            InputLabelProps={{ shrink: true }}
+            inputProps={{ className: 'mono', spellCheck: false, autoCapitalize: 'off', autoCorrect: 'off' }}
+            sx={{ minWidth: 230, flex: 1, maxWidth: 320 }}
+          />
+          <TextField
+            size="small" type="datetime-local" label="From (your local time)"
+            value={draft.since} onChange={e => setDraft({ ...draft, since: e.target.value })}
+            InputLabelProps={{ shrink: true }} sx={{ minWidth: 210 }}
+          />
+          <TextField
+            size="small" type="datetime-local" label="To (your local time)"
+            value={draft.until} onChange={e => setDraft({ ...draft, until: e.target.value })}
+            InputLabelProps={{ shrink: true }} sx={{ minWidth: 210 }}
+          />
+          <TextField
+            select size="small" label="Reason" value={draft.reason}
+            onChange={e => setDraft({ ...draft, reason: e.target.value })}
+            InputLabelProps={{ shrink: true }} SelectProps={{ displayEmpty: true }} sx={{ minWidth: 190 }}
+          >
+            <MenuItem value="">All</MenuItem>
+            {Object.keys(BLOCKED_REASON_META).map(k => (
+              <MenuItem key={k} value={k}>{BLOCKED_REASON_META[k].label}</MenuItem>
+            ))}
+            <MenuItem value="report_only">Report-only</MenuItem>
+          </TextField>
+          <Button type="submit" variant="contained">Apply</Button>
+          <Button onClick={reset}>Reset</Button>
+        </Box>
+        {filterErr && <Alert severity="error" sx={{ mb: 2 }}>{filterErr}</Alert>}
+        {listErr && <Alert severity="error" sx={{ mb: 2 }}>{listErr}</Alert>}
+
+        {!listErr && entries.length === 0 && (
+          <Box sx={{ py: 5, textAlign: 'center' }}>
+            <Icon name="block" size={36} style={{ opacity: 0.35 }} />
+            <Typography color="text.secondary" sx={{ mt: 1 }}>
+              {loaded ? 'No blocked requests for these filters.' : 'Loading…'}
+            </Typography>
+          </Box>
+        )}
+
+        {entries.length > 0 && (
+          <Box sx={{ overflowX: 'auto' }}>
+            <Table size="small">
+              <TableHead>
+                <TableRow>
+                  <TableCell sx={{ fontWeight: 700 }}>Hour (UTC)</TableCell>
+                  <TableCell sx={{ fontWeight: 700 }}>Address</TableCell>
+                  <TableCell sx={{ fontWeight: 700 }} align="right">Hits</TableCell>
+                  <TableCell sx={{ fontWeight: 700 }}>First / last seen</TableCell>
+                  <TableCell sx={{ fontWeight: 700 }}>First / last request</TableCell>
+                  <TableCell sx={{ fontWeight: 700 }}>Host</TableCell>
+                  <TableCell sx={{ fontWeight: 700 }}>User agent</TableCell>
+                  <TableCell sx={{ fontWeight: 700 }}>Reason</TableCell>
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {entries.map((r, i) => (
+                  <BlockedRequestRow key={blockedText(r.id) || 'row-' + i} entry={r} onFilterAddress={filterAddress} />
+                ))}
+              </TableBody>
+            </Table>
+          </Box>
+        )}
+
+        {entries.length > 0 && (
+          <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1.5, flexWrap: 'wrap', mt: 2 }}>
+            <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>
+              Showing {blockedCount(entries.length)} of {blockedCount(total)}
+            </Typography>
+            {nextCursor && (
+              <Button size="small" variant="outlined" onClick={loadMore} disabled={loadingMore}>
+                {loadingMore ? 'Loading…' : 'Load more'}
+              </Button>
+            )}
+          </Box>
+        )}
+      </Paper>
+
+      <PurgeBlockedRequestsDialog
+        open={purgeOpen}
+        onClose={() => setPurgeOpen(false)}
+        filters={purgeFilters}
+        hasFilters={hasFilters}
+        onDone={purged}
+      />
+    </Box>
+  );
+}
+
 /* ==================== MODERN ADMIN SIGN-IN SCREEN ==================== */
 function Login({ onLogin, mode, onToggleMode }) {
   const [username, setU] = useState('');
@@ -4762,7 +5432,7 @@ const SIDEBAR_WIDTH = 264;
 function Dashboard({ me, onLogout, mode, onToggleMode, notify }) {
   const isMobile = useMediaQuery('(max-width:960px)');
   const [mobileOpen, setMobileOpen] = useState(false);
-  const [navSection, setNavSection] = useState('providers'); // 'providers' | 'directory' | 'api' | 'audit' | 'account'
+  const [navSection, setNavSection] = useState('providers'); // 'providers' | 'directory' | 'api' | 'audit' | 'blocked' | 'account'
   const [providers, setProviders] = useState([]);
   const [activeProviderId, setActiveProviderId] = useState(null);
   const [openCreate, setOpenCreate] = useState(false);
@@ -4852,6 +5522,14 @@ function Dashboard({ me, onLogout, mode, onToggleMode, notify }) {
           <Icon name="policy" size={20} />
           <span style={{ flex: 1 }}>Admin Audit Log</span>
         </Box>
+        {/* IP allowlist status and refused requests: hidden for administrators outside
+            ip_allowlist_admins (/api/me can_view_blocked_requests); the server checks again. */}
+        {me.can_view_blocked_requests !== false && (
+          <Box component="button" sx={navItemSx(navSection === 'blocked')} onClick={() => { setNavSection('blocked'); setMobileOpen(false); }}>
+            <Icon name="block" size={20} />
+            <span style={{ flex: 1 }}>Blocked Requests</span>
+          </Box>
+        )}
         <Box component="button" sx={navItemSx(navSection === 'account')} onClick={() => { setNavSection('account'); setMobileOpen(false); }}>
           <Icon name="phonelink_lock" size={20} />
           <span style={{ flex: 1 }}>Account Security</span>
@@ -5111,6 +5789,9 @@ function Dashboard({ me, onLogout, mode, onToggleMode, notify }) {
 
           {/* VIEW 4: ADMIN AUDIT LOG (G1a-01) */}
           {navSection === 'audit' && <AdminAuditLogPanel onNotify={notify} />}
+
+          {/* VIEW 4b: IP ALLOWLIST & BLOCKED REQUESTS (loaded only while it is open) */}
+          {navSection === 'blocked' && <BlockedRequestsPanel onNotify={notify} />}
 
           {/* VIEW 5: ACCOUNT SECURITY: AUTHENTICATOR APP (G2a-07) */}
           {navSection === 'account' && <AccountSecurityPanel me={me} onNotify={notify} />}

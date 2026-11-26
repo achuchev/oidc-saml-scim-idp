@@ -13,6 +13,11 @@
 #   index.php. The rules below keep Apache from serving the project's files directly.
 # - HTTPS: set OIDC_PUBLIC_BASE_URL (public_base_url in config.php) to the https:// URL. When
 #   the site also answers on port 80, keep the HTTPS redirect in section 2 below.
+# - IP allowlist (ip_allowlist in config.php): keep section 0 below (in a subdirectory install
+#   write its URL path in the ErrorDocument lines), and keep display_errors and
+#   display_startup_errors Off in php.ini. Server level (not in .htaccess): ServerTokens Prod,
+#   ServerSignature Off, TraceEnable Off; keep ProxyErrorOverride Off; do not make the IdP the
+#   default virtual host (a scan by IP address then gets another site's certificate).
 # - Server-level settings that cannot go in .htaccess (virtual host or server config; on cPanel
 #   WHM > Apache Configuration > Include Editor, and the PHP-FPM pool options). They bound
 #   request bodies and slow clients before PHP is involved (G1c-07):
@@ -33,6 +38,15 @@ LimitRequestBody 1048576
 Options -Indexes -MultiViews
 DirectoryIndex index.php
 
+# 0. Apache's own error answers go to index.php. With ip_allowlist set in config.php, index.php
+#    answers every address outside it with the same empty 404 as for any other URL, also for
+#    the 403s of the rules below and of src/.htaccess and for request bodies over the limits
+#    above; other addresses get the original status. Harmless while ip_allowlist is empty.
+#    Subdirectory install: write its URL path, for example ErrorDocument 403 /idp/index.php.
+ErrorDocument 403 /index.php
+ErrorDocument 404 /index.php
+ErrorDocument 413 /index.php
+
 # 1. Files that are never served, by name. This works without mod_rewrite, and none of these
 #    names is an IdP route.
 <FilesMatch "^(users\.txt|scim_master\.key|error_log|php-error\.log|config\.php|config\.example\.php|php_test\.php|php84-fcgi\.ini|php\.fcgi|htaccess\.example|\.ht.*|\.env.*|\.user\.ini|\.git.*)$">
@@ -46,9 +60,9 @@ DirectoryIndex index.php
 </FilesMatch>
 
 # Without mod_rewrite the IdP routes cannot work. Fail closed: serve no file but index.php
-# and favicon.ico until mod_rewrite is enabled (an empty name is a directory request).
+# until mod_rewrite is enabled (an empty name is a directory request).
 <IfModule !mod_rewrite.c>
-  <FilesMatch "^(?!(index\.php|favicon\.ico)?$)">
+  <FilesMatch "^(?!(index\.php)?$)">
     <IfModule mod_authz_core.c>
       Require all denied
     </IfModule>
@@ -101,11 +115,12 @@ DirectoryIndex index.php
   RewriteRule (\.(sqlite3?|db|key|pem|ini|fcgi|md|txt|log|bak|orig|swp)|-(wal|shm|journal))$ - [F,L,NC]
 
   # 4. Front controller. index.php answers every other request, also for files that exist:
-  #    /openapi.json is generated from the configured base URL, and the tracked copy in the
-  #    project folder is never served. Only favicon.ico and existing files under /.well-known/
-  #    (for example ACME HTTP-01 challenges) are served as they are.
+  #    /openapi.json is generated from the configured base URL (the tracked copy in the project
+  #    folder is never served), and favicon.ico is sent by index.php after the IP allowlist
+  #    check, because the icon identifies this application. Only existing files under
+  #    /.well-known/ (ACME HTTP-01 challenges) are served as they are, to every address; to serve
+  #    only ACME challenges, use instead: RewriteRule ^\.well-known/acme-challenge/ - [L]
   RewriteRule ^index\.php$ - [L]
-  RewriteRule ^favicon\.ico$ - [L]
   RewriteCond %{REQUEST_FILENAME} -f
   RewriteRule ^\.well-known/ - [L]
   RewriteRule ^ index.php [L]
