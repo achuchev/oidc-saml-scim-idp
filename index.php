@@ -62,6 +62,31 @@ if (PHP_SAPI === "cli" && ($argv[1] ?? "") === "hash-admin-password") {
     }
 }
 
+// Command line: "php index.php ip-allowlist [status|check <ip>|recent]" shows the IP allowlist
+// (ip_allowlist in config.php), why an address is allowed or refused, and the newest refused
+// requests; for lockout recovery and deploy checks (exit codes in src/ip_allowlist.php). Run it
+// as the web server user. It reads no main database, so it runs before it is opened.
+if (PHP_SAPI === "cli" && ($argv[1] ?? "") === "ip-allowlist") {
+    exit(ip_allowlist_cli(array_slice($argv, 2), $CONFIG_DIR));
+}
+
+// favicon.ico is answered here, after the IP allowlist check in bootstrap, never by the web
+// server: the icon identifies the product. "private" keeps shared caches from handing it to
+// refused addresses.
+if (PHP_SAPI !== "cli" && $path === "/favicon.ico" && ($method === "GET" || $method === "HEAD")) {
+    $icon = @file_get_contents(__DIR__ . "/favicon.ico");
+    if (is_string($icon)) {
+        send_security_headers(false);
+        header("Content-Type: image/x-icon");
+        header("Cache-Control: private, max-age=86400");
+        header("Content-Length: " . strlen($icon));
+        if ($method === "GET") {
+            echo $icon;
+        }
+        exit();
+    }
+}
+
 storage_initialize($PROVIDERS_FILE);
 if ($APIKEYS_FILE !== $PROVIDERS_FILE) {
     storage_initialize($APIKEYS_FILE);
