@@ -88,8 +88,8 @@ the environment, never from `config.php`; see section 6 and `config.example.php`
 
 Runtime data lives only in the data directory: `OIDC_CONFIG_DIR` (legacy alias `CONFIG_DIR`),
 else `config_dir` in `config.php`, else the sibling folder `<project-folder>_config`. It holds
-`providers.sqlite`, `scim_master.key`, `users.txt`, `sessions/` and, for old file-based keys,
-`keys/`.
+`providers.sqlite`, `scim_master.key`, `users.txt` and `sessions/`, for old file-based keys
+also `keys/`, and with the IP allowlist `blocked_requests.sqlite`.
 
 - **Placement**: the data directory must be outside the web root. Bootstrap refuses to start
   (HTTP 500, reason in the error log) when the data directory, or a path set with
@@ -135,6 +135,12 @@ else `config_dir` in `config.php`, else the sibling folder `<project-folder>_con
     another environment key cannot be opened), while moving from `scim_master.key` to
     `OIDC_SCIM_ENCRYPTION_KEY` re-encrypts them. Turning `allow_password_push_with_key_file` off
     without the variable deletes them too.
+- **Blocked requests (`blocked_requests.sqlite`)**: requests the IP allowlist refused
+  (`ip_allowlist`, see `config.example.php`). It holds client addresses, user agents and paths,
+  which are personal data: keep `ip_allowlist_log_retention_days` short. It can be deleted at
+  any time and need not be backed up. Read it from the command line only as the web server
+  user: `-wal` and `-shm` files that another user leaves next to it can stop the web server
+  from recording.
 - **Admin API clients (upgrade)**: existing Admin API clients lose `can_mint_tokens` (minting
   JWTs at `POST /api/token`, importing signing keys, managing OIDC clients that can use the
   `client_credentials` grant). Re-grant it per client in the console, or set

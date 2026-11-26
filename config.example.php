@@ -16,9 +16,9 @@
 // flags exist so that an existing deployment can keep an old behavior while it migrates:
 // enable one only when you need it, and plan to turn it off again. The commented-out
 // lines show each setting at its default. Some settings are not compatibility flags:
-// max_passkeys_per_user and the sign-in rate limits are limits, and admin_require_mfa is
-// opt-in hardening (true is the stricter behavior). OIDC_SCIM_ENCRYPTION_KEY is read only
-// from the environment.
+// max_passkeys_per_user and the sign-in rate limits are limits, admin_require_mfa is opt-in
+// hardening (true is the stricter behavior), and so is the IP allowlist (ip_allowlist).
+// OIDC_SCIM_ENCRYPTION_KEY is read only from the environment.
 //
 // Upgrade notes for this release:
 // - Runtime data lives only in the data directory (config_dir below). See
@@ -54,6 +54,9 @@
 //   corporate NAT), raise the limits.
 // - Directory user passwords set through the Admin API, the console or inbound SCIM must now
 //   meet a minimum policy (see allow_weak_directory_passwords); weaker ones get 400.
+// - New and off until configured: the IP allowlist (ip_allowlist below). Before turning it
+//   on, update the web-root .htaccess from htaccess.example: it now sends Apache's own
+//   403/404/413 answers and favicon.ico to index.php.
 // - Entries below with an "Upgrade note" describe further changes that existing
 //   deployments notice: legacy_saml_persistent_ids, scim_ignore_if_match,
 //   scim_outbound_omit_empty_attributes and allow_weak_directory_passwords.
@@ -133,7 +136,8 @@ return [
     // the proxy.
     // Empty: REMOTE_ADDR stays the client IP, so behind a proxy every client shares one
     // rate-limit bucket, including the sign-in rate limits below.
-    // Risk: a listed address that is not a proxy can forge X-Forwarded-For past rate limits.
+    // Risk: a listed address that is not a proxy can forge X-Forwarded-For past rate limits
+    // and the IP allowlist.
     // "trusted_proxies" => [], // for example ["10.0.0.5", "fd00:1::/64"]
 
     // trust_proxy (env OIDC_TRUST_PROXY; default: false)
@@ -158,6 +162,105 @@ return [
     // none of these headers (better: make the proxy send X-Forwarded-Proto: https).
     // Risk: passwords, tokens and session cookies are sent and accepted over unencrypted HTTP.
     // "allow_plain_http_requests" => false,
+
+    // ---------- IP allowlist (opt-in hardening) ----------
+    // Off until ip_allowlist has an entry. Then only clients whose address is inside one of its
+    // ranges are served. Every other request gets an empty HTTP 404, the same for every URL and
+    // method: no body, no cookie and none of this application's headers, so scanners outside
+    // the ranges cannot tell what runs here. It is answered before anything else (400, 403,
+    // 421, the HTTPS redirect, configuration errors) and before a session, a cookie or the main
+    // database is touched, and recorded (ip_allowlist_log; console: Blocked Requests).
+    // Command-line runs are never filtered.
+    // The client address is REMOTE_ADDR or, only when REMOTE_ADDR is in trusted_proxies, the
+    // X-Forwarded-For hop described there. A request with a malformed hop, more than 32 hops or
+    // a REMOTE_ADDR that is not an IP address is refused; trusted_proxies entries that cover
+    // every address (such as 0.0.0.0/0) are ignored here; Forwarded, X-Real-IP and similar
+    // headers are never read.
+    // Every caller must be inside a range: administrators' and users' browsers, the servers of
+    // your relying parties and service providers (token, userinfo, JWKS and metadata requests),
+    // SCIM clients, on-premises SCIM agents, uptime monitors, load-balancer health checks, and
+    // this server itself when a SCIM connector targets its own host name.
+    // Turning it on without locking yourself out:
+    // 1. Behind a reverse proxy, set trusted_proxies first.
+    // 2. Set ip_allowlist and ip_allowlist_report_only = true: nothing is refused yet, would-be
+    //    refusals are recorded, and Blocked Requests shows whether your own address gets in.
+    // 3. When only expected traffic appears there, remove ip_allowlist_report_only while a
+    //    shell or file manager (SSH, cPanel Terminal or File Manager) is open.
+    // Locked out? As the web server user:
+    //   php index.php ip-allowlist              the configuration and its problems
+    //   php index.php ip-allowlist check <ip>   whether an address gets in, and why
+    //   php index.php ip-allowlist recent       the newest refused requests (yours included)
+    // then fix ip_allowlist here, or stop refusing with OIDC_IP_ALLOWLIST_REPORT_ONLY=1 in the
+    // web server's environment (it works even while this file does not load). With
+    // opcache.validate_timestamps=0, reload PHP after editing this file.
+    // Web server: under Apache or LiteSpeed update the web-root .htaccess from htaccess.example
+    // (section 0, favicon.ico), otherwise the web server itself answers favicon.ico and its own
+    // 403 pages, which identify this site. php.ini must keep display_errors and
+    // display_startup_errors Off (php84-fcgi.ini does): PHP prints startup warnings, such as
+    // for an oversized POST, before any check runs. php -S: always pass index.php as the router
+    // and add -d display_errors=0 -d display_startup_errors=0. nginx: send every request,
+    // favicon.ico included, to index.php and keep fastcgi_intercept_errors off.
+    // Not hidden: the TLS certificate and its names (also in Certificate Transparency logs),
+    // the Server header, what the web server answers before PHP runs (malformed requests,
+    // TRACE, the plain-HTTP redirect, existing files under /.well-known/) and response timing.
+    // A caching CDN or proxy in front of this site can hand allowed answers to refused
+    // clients: list it in trusted_proxies and turn its caching off for this host.
+
+    // ip_allowlist (env OIDC_IP_ALLOWLIST; default: empty list, the check is off)
+    // IPv4 and IPv6 addresses or CIDR blocks: "203.0.113.0/24", "198.51.100.7" (one address),
+    // "2001:db8:1::/48". IPv4 and IPv6 are separate: an IPv4 client (also as ::ffff:a.b.c.d on
+    // a dual-stack listener) matches only IPv4 entries, so when the host name has an AAAA
+    // record list your IPv6 networks too (at least the /64 of each; devices change address
+    // inside it). Host names, wildcards and ranges written with "-" are not accepted. In this
+    // file an entry may carry a name, shown in the console:
+    //   ["203.0.113.0/24" => "Office", "2001:db8:1::/48" => "VPN", "198.51.100.7"]
+    // The environment variable is one string separated by commas or spaces; it replaces this
+    // list (no merging) and carries no names. An entry that is not a valid address or block is
+    // ignored and reported (console, php index.php ip-allowlist, PHP error log at most hourly);
+    // when no entry is valid, every request is refused. If this file stops loading (a syntax
+    // error, or it no longer returns an array) while it sets ip_allowlist and the environment
+    // variable is unset, every request is refused until it loads again (check it with
+    // php -l config.php).
+    // Risk (empty): the IdP is reachable, and identifiable, from any address.
+    // "ip_allowlist" => [], // for example ["203.0.113.0/24" => "Office", "2001:db8:1::/48"]
+
+    // ip_allowlist_report_only (env OIDC_IP_ALLOWLIST_REPORT_ONLY; default: false)
+    // true serves every request and records those ip_allowlist would refuse (shown as
+    // report-only), to check the list before it is enforced. Also the quickest way back in
+    // after a mistake: OIDC_IP_ALLOWLIST_REPORT_ONLY=1. No effect while ip_allowlist is empty.
+    // Risk (true): nothing is refused.
+    // "ip_allowlist_report_only" => false,
+
+    // ip_allowlist_log (env OIDC_IP_ALLOWLIST_LOG; default: true)
+    // Records refused requests in <config_dir>/blocked_requests.sqlite: one row per client
+    // address (an IPv6 /64), reason and hour, with the number of requests, the first and the
+    // last request (method and path, never the query string), the Host header, the user agent
+    // and, behind a proxy, its address and X-Forwarded-For. Bodies, cookies and other headers
+    // are never stored. Recording never changes the 404 and gives up after about 50 ms when
+    // the file is busy; when the data directory is missing or not writable, nothing is
+    // recorded. The file can be deleted at any time and is not needed in backups.
+    // "ip_allowlist_log" => true,
+
+    // ip_allowlist_log_retention_days (env OIDC_IP_ALLOWLIST_LOG_RETENTION_DAYS; default: 30)
+    // Rows whose last request is older than this many days are deleted. Whole number, clamped
+    // to 1..365; any other value is logged and the default is used. Addresses and user agents
+    // are personal data in many jurisdictions: keep this as short as your review needs.
+    // "ip_allowlist_log_retention_days" => 30,
+
+    // ip_allowlist_log_max_mb (env OIDC_IP_ALLOWLIST_LOG_MAX_MB; default: 32)
+    // Largest size of blocked_requests.sqlite in MiB; when it is full, the oldest rows make
+    // room. Whole number, clamped to 1..1024; any other value is logged and the default is
+    // used. Lowering it below the file's current size only stops further growth; delete the
+    // file to shrink it.
+    // "ip_allowlist_log_max_mb" => 32,
+
+    // ip_allowlist_admins (env OIDC_IP_ALLOWLIST_ADMINS; default: empty list, every console
+    // administrator)
+    // users.txt names (exact, case-sensitive) of the administrators who may open Blocked
+    // Requests (the ranges and the refused requests of the whole installation, including those
+    // for other administrators' providers), export and purge it. Admin API clients never have
+    // access.
+    // "ip_allowlist_admins" => [],
 
     // ---------- Protocol compatibility flags ----------
 
