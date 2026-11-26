@@ -1216,6 +1216,8 @@ function handle_api_routes(
             "csrfToken" => csrf_token(),
             "rpId" => $rpId,
             "baseUrl" => $baseUrl,
+            // Whether the console shows Blocked Requests (ip_allowlist_admins); the routes check again.
+            "can_view_blocked_requests" => ip_allowlist_admin_allowed($u),
         ];
         // apiKey is returned only while legacy_admin_api_key is enabled (S10-04).
         if (config_flag("legacy_admin_api_key", "OIDC_LEGACY_ADMIN_API_KEY")) {
@@ -1379,6 +1381,105 @@ function handle_api_routes(
         json_response(200, [
             "logs" => admin_audit_list($PROVIDERS_FILE, $owner, $lim),
         ]);
+    }
+
+    // ---------- IP Allowlist & Blocked Requests [Session Admin Only] ----------
+    // The operator's IP allowlist (ip_allowlist in config.php or OIDC_IP_ALLOWLIST; read-only here)
+    // and the requests it refused (src/ip_allowlist.php, src/blocked_requests.php). Console sessions
+    // of the administrators in ip_allowlist_admins (default: all) only.
+    if ($path === "/api/ip-allowlist" && $method === "GET") {
+        ip_allowlist_require_viewer(require_admin_auth($PROVIDERS_FILE, $origin));
+        json_response(200, ip_allowlist_status($CONFIG_DIR));
+    }
+
+    if ($path === "/api/ip-allowlist/blocked-requests" && in_array($method, ["GET", "DELETE"], true)) {
+        // DELETE: require_login() checks Origin and X-CSRF-Token.
+        $auth = require_admin_auth($PROVIDERS_FILE, $origin);
+        ip_allowlist_require_viewer($auth);
+        $unavailable = static function (Throwable $e) use ($method): never {
+            // Paths and SQLite messages stay in the log.
+            error_log($method . " /api/ip-allowlist/blocked-requests: " . $e->getMessage());
+            if (headers_sent()) {
+                // A CSV download that failed after it started ends short; a JSON error appended
+                // to it would only corrupt the file.
+                exit();
+            }
+            header_remove("Content-Disposition"); // the error is not a download
+            json_response(503, ["error" => "The blocked-request log is unavailable"]);
+        };
+        if ($method === "GET") {
+            try {
+                $filters = blocked_requests_filters($_GET);
+            } catch (InvalidArgumentException $e) {
+                json_response(400, ["error" => $e->getMessage()]);
+            }
+            $format = is_string($_GET["format"] ?? null) ? strtolower(trim($_GET["format"])) : "json";
+            if ($format !== "json" && $format !== "csv") {
+                json_response(400, ["error" => "format must be json or csv"]);
+            }
+            if ($format === "csv") {
+                // The export is audited below even when the browser cancels the download, and the
+                // session lock is released first, so a long download does not hold up the console.
+                ignore_user_abort(true);
+                if (session_status() === PHP_SESSION_ACTIVE) {
+                    session_write_close();
+                }
+                try {
+                    $rows = blocked_requests_send_csv($CONFIG_DIR, $filters);
+                } catch (RuntimeException $e) {
+                    $unavailable($e);
+                }
+                admin_audit_append($PROVIDERS_FILE, $auth, "ip_allowlist.log_exported", "success", null, "",
+                    ["rows" => $rows, "filters" => blocked_requests_filters_public($filters)]);
+                exit();
+            }
+            // limit and cursor: absent or empty (as for the filters) means unset; otherwise digits.
+            $rawLimit = $_GET["limit"] ?? "";
+            $limit = $rawLimit === ""
+                ? 100
+                : (is_string($rawLimit) && preg_match('/^\d{1,9}$/D', $rawLimit) === 1 ? (int) $rawLimit : 0);
+            if ($limit < 1 || $limit > BLOCKED_REQUESTS_LIST_MAX) {
+                json_response(400, ["error" => "limit must be a whole number from 1 to " . BLOCKED_REQUESTS_LIST_MAX]);
+            }
+            $rawCursor = $_GET["cursor"] ?? "";
+            $cursor = null;
+            if ($rawCursor !== "") {
+                if (!is_string($rawCursor) || preg_match('/^\d{1,18}$/D', $rawCursor) !== 1) {
+                    json_response(400, ["error" => "cursor must be the next_cursor of a previous page"]);
+                }
+                $cursor = (int) $rawCursor;
+            }
+            try {
+                json_response(200, blocked_requests_list($CONFIG_DIR, $filters, $limit, $cursor));
+            } catch (RuntimeException $e) {
+                $unavailable($e);
+            }
+        }
+        // DELETE {"password": "...", "all": true} or {"password": "...", <at least one filter>}
+        $input = read_json_body();
+        $all = ($input["all"] ?? false) === true;
+        try {
+            $filters = blocked_requests_filters($input);
+        } catch (InvalidArgumentException $e) {
+            json_response(400, ["error" => $e->getMessage()]);
+        }
+        $hasFilter = !blocked_requests_filters_empty($filters);
+        if ($all === $hasFilter) {
+            json_response(400, ["error" => "Send \"all\": true or at least one filter (ip, since, until, reason, enforced), not both"]);
+        }
+        // A borrowed session cannot wipe the record: 403 wrong password, 429 after 5 within 15 minutes.
+        api_admin_reauthenticate_or_fail($PROVIDERS_FILE, $USERS_FILE, $auth, $input);
+        try {
+            $deleted = blocked_requests_purge($CONFIG_DIR, $all ? [] : $filters);
+        } catch (RuntimeException $e) {
+            $unavailable($e);
+        }
+        admin_audit_append($PROVIDERS_FILE, $auth, "ip_allowlist.log_purged", "success", null, "", [
+            "scope" => $all ? "all" : "filtered",
+            "filters" => $all ? [] : blocked_requests_filters_public($filters),
+            "deleted" => $deleted,
+        ]);
+        json_response(200, ["deleted" => $deleted]);
     }
 
     // ---------- Administrator Authenticator App (TOTP, G2a-07) [Session Admin Only] ----------
