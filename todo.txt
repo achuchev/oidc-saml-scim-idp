@@ -1,0 +1,9 @@
+Resolved:
+- [x] when EdDSA key is used, the discovery document now accurately reflects EdDSA
+- [x] SAML 2.0 IdP support (live hosted Metadata URL, XML export, SP XML import, signed AuthnRequest & Assertion)
+- [x] Interactive OIDC 1.0 + PKCE support & Shared Test Users Directory
+- [x] macOS Touch ID (WebAuthn Platform Authenticator) registration & authentication
+- [x] Deep security audit & hardening (CSRF, XSS, SSRF, SAML XSW, WebAuthn replay/collision/enumeration, OIDC secret hashing & code binding, brute-force rate limiting)
+- [x] Modern SaaS Web UI across Admin Console & End-User SSO flows (Light/Dark theme, Sidebar + Full-Page Workspace)
+- [x] Programmatic Administration API with Multi-Provider Scoped API Clients + OpenAPI 3.1.0 Spec (/api/openapi.json, openapi.json, /api/docs)
+- [x] SCIM 2.0 (RFC 7643/7644) Inbound Identity Server (/{idpId}/scim/v2) & Outbound Push Provisioning Connectors with optional password sync

@@ -1,0 +1,112 @@
+# Root .htaccess template for Apache 2.4 with mod_rewrite (cPanel and similar hosting).
+# Copy it to .htaccess in the web root (the project folder). /.htaccess itself is
+# git-ignored, so local changes stay out of the repository.
+#
+# Deployment checklist:
+# - The data directory (OIDC_CONFIG_DIR or config_dir in config.php; default: the sibling
+#   folder <project-folder>_config) must be outside the web root. See
+#   KEY_STORAGE_MIGRATION.md, section 6.
+# - php84-fcgi.ini: replace CPANEL_USER in error_log, session.save_path and upload_tmp_dir
+#   with the account name and create the directories:
+#   mkdir -m 0700 ~/logs ~/php-sessions ~/php-tmp
+# - The application's own path blocklist (src/bootstrap.php) only sees requests that reach
+#   index.php. The rules below keep Apache from serving the project's files directly.
+# - HTTPS: set OIDC_PUBLIC_BASE_URL (public_base_url in config.php) to the https:// URL. When
+#   the site also answers on port 80, keep the HTTPS redirect in section 2 below.
+# - Server-level settings that cannot go in .htaccess (virtual host or server config; on cPanel
+#   WHM > Apache Configuration > Include Editor, and the PHP-FPM pool options). They bound
+#   request bodies and slow clients before PHP is involved (G1c-07):
+#     mod_fcgid:      FcgidMaxRequestLen 9437184   (the agent result endpoint takes 8 MiB)
+#     mod_reqtimeout: RequestReadTimeout header=20-40,MinRate=500 body=20,MinRate=500
+#     PHP-FPM pool:   request_terminate_timeout = 300s   (max_execution_time counts CPU time
+#                     on Linux, so it does not end a request that only waits)
+
+# Request body limits (G1c-07). Every route reads at most 512 KiB, except the on-prem SCIM
+# agent result endpoint (/{idpId}/scim/agent/result), which accepts up to 8 MiB.
+# THE_REQUEST is the original request line, which the rewrite to index.php does not change.
+LimitRequestBody 1048576
+<If "%{THE_REQUEST} =~ m#/scim/agent/result[ ?]#">
+  LimitRequestBody 9437184
+</If>
+
+# No directory listings, and no content negotiation (/config must never find config.php).
+Options -Indexes -MultiViews
+DirectoryIndex index.php
+
+# 1. Files that are never served, by name. This works without mod_rewrite, and none of these
+#    names is an IdP route.
+<FilesMatch "^(users\.txt|scim_master\.key|error_log|php-error\.log|config\.php|config\.example\.php|php_test\.php|php84-fcgi\.ini|php\.fcgi|htaccess\.example|\.ht.*|\.env.*|\.user\.ini|\.git.*)$">
+  <IfModule mod_authz_core.c>
+    Require all denied
+  </IfModule>
+  <IfModule !mod_authz_core.c>
+    Order allow,deny
+    Deny from all
+  </IfModule>
+</FilesMatch>
+
+# Without mod_rewrite the IdP routes cannot work. Fail closed: serve no file but index.php
+# and favicon.ico until mod_rewrite is enabled (an empty name is a directory request).
+<IfModule !mod_rewrite.c>
+  <FilesMatch "^(?!(index\.php|favicon\.ico)?$)">
+    <IfModule mod_authz_core.c>
+      Require all denied
+    </IfModule>
+    <IfModule !mod_authz_core.c>
+      Order allow,deny
+      Deny from all
+    </IfModule>
+  </FilesMatch>
+</IfModule>
+
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+  # Installed in a subdirectory that is reached through an Alias: set its URL path here.
+  # RewriteBase /
+
+  # FastCGI and CGI drop the Authorization header. The admin API, SCIM and the OIDC token
+  # endpoint read Bearer and Basic credentials from it (PHP sees REDIRECT_HTTP_AUTHORIZATION).
+  RewriteCond %{HTTP:Authorization} .
+  RewriteRule ^ - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
+
+  # 2. HTTPS redirect (S13-07). Required when the site also answers on port 80: plain-HTTP
+  #    requests are sent to https:// before they reach PHP, so passwords, tokens and session
+  #    cookies are never exchanged in clear text. index.php also redirects GET and HEAD (and
+  #    refuses other methods) when public_base_url is https. Requests that a TLS-terminating
+  #    proxy forwards with X-Forwarded-Proto: https are not redirected, so this cannot loop.
+  #    ACME HTTP-01 challenges stay reachable over HTTP. With several host names, write the
+  #    public host name instead of %{HTTP_HOST}. Health checks that use plain HTTP get the
+  #    redirect too: point them at https:// or let them accept 301.
+  RewriteCond %{HTTPS} !=on
+  RewriteCond %{HTTP:X-Forwarded-Proto} !https [NC]
+  RewriteCond %{REQUEST_URI} !^/\.well-known/acme-challenge/
+  RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [R=301,L]
+
+  # 3. Denied paths.
+  # Dot files and dot folders at any depth (.git, .svn, .env*, .user.ini, .ht*, .data/),
+  # except .well-known (/{idpId}/.well-known/openid-configuration is an IdP route) and the
+  # SCIM ".search" endpoints (/{idpId}/scim/v2/Users/.search and similar).
+  RewriteRule (^|/)\.(?!well-known(/|$)|search$) - [F,L]
+
+  # Internal folders, whether or not they exist.
+  RewriteRule ^(src|keys|samples|sessions|onprem-scim-agent)(/|$) - [F,L,NC]
+
+  # Internal files, by name.
+  RewriteRule (^|/)(users\.txt|scim_master\.key|error_log|php-error\.log|config\.php|config\.example\.php|php_test\.php|php84-fcgi\.ini|php\.fcgi|htaccess\.example)$ - [F,L,NC]
+
+  # Existing files, by type: databases (with their -wal, -shm and -journal files), keys,
+  # certificates, ini files, logs and documentation. Only files that exist: the URL
+  # /{idpId}/saml/cert.pem is an IdP route answered by index.php and must not be refused.
+  RewriteCond %{REQUEST_FILENAME} -f
+  RewriteRule (\.(sqlite3?|db|key|pem|ini|fcgi|md|txt|log|bak|orig|swp)|-(wal|shm|journal))$ - [F,L,NC]
+
+  # 4. Front controller. index.php answers every other request, also for files that exist:
+  #    /openapi.json is generated from the configured base URL, and the tracked copy in the
+  #    project folder is never served. Only favicon.ico and existing files under /.well-known/
+  #    (for example ACME HTTP-01 challenges) are served as they are.
+  RewriteRule ^index\.php$ - [L]
+  RewriteRule ^favicon\.ico$ - [L]
+  RewriteCond %{REQUEST_FILENAME} -f
+  RewriteRule ^\.well-known/ - [L]
+  RewriteRule ^ index.php [L]
+</IfModule>

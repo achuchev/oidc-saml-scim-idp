@@ -1,0 +1,10 @@
+{
+  "cloud_idp_url": "https://idp.example.com/YOUR_IDP_ID",
+  "agent_token": "idp_sagt_REPLACE_WITH_TOKEN_FROM_ADMIN_CONSOLE",
+  "local_scim_base_url": "http://127.0.0.1:8080/scim/v2",
+  "local_scim_bearer_token": "REPLACE_WITH_ONPREM_APP_SCIM_BEARER_TOKEN",
+  "local_insecure_skip_tls_verify": false,
+  "poll_wait_seconds": 12,
+  "local_timeout_seconds": 20,
+  "log_file": "logs/scim-agent.log"
+}

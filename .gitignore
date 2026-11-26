@@ -1,0 +1,28 @@
+.DS_Store
+.data/
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
+*.db
+*.log
+# Runtime secrets and logs that must never be committed (keep them outside the web root)
+users.txt
+scim_master.key
+keys/
+sessions/
+error_log
+php-error.log
+# Go build outputs
+onprem-scim-agent/*.exe
+onprem-scim-agent/scim-agent
+onprem-scim-agent/config.json
+# Host-specific / sensitive deployment files
+php.fcgi
+samples/glow-in-the-dark.eu.xml
+/.htaccess
+/htaccess
+
+# Local configuration
+/config.php
