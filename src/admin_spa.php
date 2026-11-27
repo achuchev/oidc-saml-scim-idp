@@ -1407,7 +1407,7 @@ function OidcClientDialog({ open, onClose, provider, editingClient, onSaved }) {
               <Typography variant="caption" color={effectiveGrants.length === 0 ? 'error.main' : 'text.secondary'} sx={{ display: 'block' }}>
                 {effectiveGrants.length === 0
                   ? 'Select at least one grant type.'
-                  : 'Implicit / Hybrid allows tokens in the redirect (response_type with token or id_token). Client Credentials is for confidential clients only.'}
+                  : 'Implicit / Hybrid allows an ID token in the redirect (response_type id_token or code id_token); access tokens come only from the token endpoint unless the operator sets legacy_implicit_access_tokens. Client Credentials is for confidential clients only.'}
               </Typography>
             </Paper>
           </Grid>

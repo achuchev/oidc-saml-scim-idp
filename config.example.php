@@ -57,6 +57,11 @@
 // - New and off until configured: the IP allowlist (ip_allowlist below). Before turning it
 //   on, update the web-root .htaccess from htaccess.example: it now sends Apache's own
 //   403/404/413 answers and favicon.ico to index.php.
+// - OAuth 2.1 defaults: code_challenge_method=plain (also what an omitted method means) is
+//   refused for every client, and response_type "token id_token" / "id_token token" (an
+//   access token from the authorization endpoint) is refused; "id_token" and "code id_token"
+//   still work for clients registered for implicit. See legacy_pkce_plain and
+//   legacy_implicit_access_tokens to restore them while relying parties migrate.
 // - Entries below with an "Upgrade note" describe further changes that existing
 //   deployments notice: legacy_saml_persistent_ids, scim_ignore_if_match,
 //   scim_outbound_omit_empty_attributes and allow_weak_directory_passwords.
@@ -309,18 +314,40 @@ return [
     // any response_type containing token or id_token, "refresh_token" to issue or redeem
     // refresh tokens (offline_access alone no longer forces one), and
     // "client_credentials" for that grant. PKCE: a code_verifier sent for a code issued
-    // without a challenge is rejected, public and require_pkce clients must use S256,
+    // without a challenge is rejected, every client must use S256 (see legacy_pkce_plain),
     // challenge and verifier syntax is validated, and the API default for require_pkce
     // is true.
     // true restores: the old leniency. Any client may use implicit/hybrid, refresh tokens
     // and (if confidential) client_credentials regardless of grant_types; "plain" PKCE is
-    // accepted for every client, and a verifier sent without a stored challenge is
-    // ignored.
+    // accepted for every client (public and require_pkce clients included, which goes beyond
+    // legacy_pkce_plain), a verifier sent without a stored challenge is ignored, and response
+    // types with "token" work again (as with legacy_implicit_access_tokens).
     // Not changed by the flag: the API default for require_pkce stays true (an explicit
     // false is still honored), and the client_credentials scope syntax (RFC 6749 section
     // 3.3, at most 1024 bytes) is always validated.
     // Risk: tokens in URL fragments, refresh tokens for any client, and PKCE downgrade.
     // "legacy_oauth_flows" => false,
+
+    // legacy_pkce_plain (env OIDC_LEGACY_PKCE_PLAIN; default: false)
+    // Secure default (OAuth 2.1): every client that sends a code_challenge must use
+    // code_challenge_method=S256. "plain", which is also what an omitted method means, is
+    // refused, and discovery lists only S256 in code_challenge_methods_supported.
+    // true restores: confidential clients that do not require PKCE may use plain again.
+    // Public and require_pkce clients still need S256 (only legacy_oauth_flows lifts that).
+    // Risk: a plain challenge is the verifier itself, so whoever sees the authorization
+    // request (browser history, proxy or server logs) can redeem an intercepted code.
+    // "legacy_pkce_plain" => false,
+
+    // legacy_implicit_access_tokens (env OIDC_LEGACY_IMPLICIT_ACCESS_TOKENS; default: false)
+    // Secure default (OAuth 2.1, RFC 9700 section 2.1.2): access tokens are issued only by
+    // the token endpoint. response_type "token id_token" and "id_token token" are refused
+    // with unsupported_response_type and are not listed in discovery. Clients registered
+    // for the "implicit" grant type can still use "id_token" and "code id_token", which
+    // return only an ID token from the authorization endpoint.
+    // true restores: response types with "token" for clients registered for implicit.
+    // Risk: access tokens in URL fragments leak through browser history, Referer headers
+    // and injected scripts, and are not bound to the client that asked for them.
+    // "legacy_implicit_access_tokens" => false,
 
     // legacy_logout_redirect (env OIDC_LEGACY_LOGOUT_REDIRECT; default: false)
     // Secure default: an RP-initiated logout (/oauth2/logout) returns the browser to its

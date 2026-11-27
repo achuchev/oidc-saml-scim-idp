@@ -4988,7 +4988,7 @@
                             "authorization_code",
                             "refresh_token"
                         ],
-                        "description": "Flows the client may use; enforced at /authorize and /token. Public clients cannot have `client_credentials`."
+                        "description": "Flows the client may use; enforced at /authorize and /token. `implicit` allows `response_type` `id_token` and `code id_token`; response types with `token` are refused unless the operator sets `OIDC_LEGACY_IMPLICIT_ACCESS_TOKENS=1`. Public clients cannot have `client_credentials`."
                     },
                     "auth_policy": {
                         "type": "string",
@@ -5056,7 +5056,8 @@
                     },
                     "require_pkce": {
                         "type": "boolean",
-                        "default": true
+                        "default": true,
+                        "description": "Require a PKCE `code_challenge` on every authorization request that returns a code. Whenever a challenge is sent, `code_challenge_method` must be `S256`: an omitted method means `plain`, which is refused unless the operator sets `OIDC_LEGACY_PKCE_PLAIN=1` (then only for confidential clients without `require_pkce`) or `OIDC_LEGACY_OAUTH_FLOWS=1` (then for every client)."
                     },
                     "grant_types": {
                         "type": "array",
@@ -5073,7 +5074,7 @@
                             "authorization_code",
                             "refresh_token"
                         ],
-                        "description": "Enforced at /authorize and /token. Public clients cannot have `client_credentials`."
+                        "description": "Enforced at /authorize and /token. `implicit` allows `response_type` `id_token` and `code id_token`; response types with `token` are refused unless the operator sets `OIDC_LEGACY_IMPLICIT_ACCESS_TOKENS=1`. Public clients cannot have `client_credentials`."
                     },
                     "auth_policy": {
                         "type": "string",

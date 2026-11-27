@@ -159,12 +159,11 @@ function discovery_doc(array $prov, string $baseUrl): array
         "saml_metadata_uri" => $issuer . "/saml/metadata",
         "saml_sso_endpoint" => $issuer . "/saml/sso",
         "scim_endpoint" => $issuer . "/scim/v2",
-        "response_types_supported" => [
-            "code",
-            "id_token",
-            "token id_token",
-            "code id_token",
-        ],
+        // Response types that return an access token from /authorize ("token id_token")
+        // only while the operator allows them (oidc_front_channel_access_tokens_allowed()).
+        "response_types_supported" => oidc_front_channel_access_tokens_allowed()
+            ? ["code", "id_token", "token id_token", "code id_token"]
+            : ["code", "id_token", "code id_token"],
         "response_modes_supported" => ["query", "fragment", "form_post"],
         "grant_types_supported" => [
             "authorization_code",
@@ -179,7 +178,7 @@ function discovery_doc(array $prov, string $baseUrl): array
             "client_secret_post",
             "none",
         ],
-        "code_challenge_methods_supported" => ["S256", "plain"],
+        "code_challenge_methods_supported" => oidc_plain_pkce_allowed() ? ["S256", "plain"] : ["S256"],
         "scopes_supported" => [
             "openid",
             "profile",
@@ -338,6 +337,30 @@ function oidc_legacy_oauth_flows(): bool
 }
 
 /**
+ * Whether code_challenge_method=plain is accepted from confidential clients that do not
+ * require PKCE: legacy_pkce_plain (env OIDC_LEGACY_PKCE_PLAIN, default off) or
+ * legacy_oauth_flows. Otherwise every client must use S256 (OAuth 2.1, RFC 9700 section
+ * 2.1.1); public and require_pkce clients need S256 even with the flag. Read on every call.
+ */
+function oidc_plain_pkce_allowed(): bool
+{
+    return config_flag("legacy_pkce_plain", "OIDC_LEGACY_PKCE_PLAIN") || oidc_legacy_oauth_flows();
+}
+
+/**
+ * Whether response types that return an access token from the authorization endpoint
+ * ("token id_token", "id_token token") are accepted: legacy_implicit_access_tokens (env
+ * OIDC_LEGACY_IMPLICIT_ACCESS_TOKENS, default off) or legacy_oauth_flows. Otherwise access
+ * tokens come only from the token endpoint (OAuth 2.1, RFC 9700 section 2.1.2), and the
+ * implicit grant type allows "id_token" and "code id_token". Read on every call.
+ */
+function oidc_front_channel_access_tokens_allowed(): bool
+{
+    return config_flag("legacy_implicit_access_tokens", "OIDC_LEGACY_IMPLICIT_ACCESS_TOKENS") ||
+        oidc_legacy_oauth_flows();
+}
+
+/**
  * Whether the client is registered for a grant type (see OIDC_GRANT_TYPES).
  * legacy_oauth_flows allows every grant type to every client again.
  */
@@ -350,12 +373,22 @@ function oidc_client_has_grant(array $client, string $grantType): bool
 /**
  * Registered grant types needed for a response_type at the authorization endpoint:
  * "code" needs authorization_code, and any response_type that returns token or
- * id_token from the authorization endpoint (implicit or hybrid) needs implicit.
- * Throws InvalidArgumentException (unauthorized_client).
+ * id_token from the authorization endpoint (implicit or hybrid) needs implicit. A
+ * response_type with "token" is refused first unless
+ * oidc_front_channel_access_tokens_allowed(). Throws InvalidArgumentException
+ * (unsupported_response_type or unauthorized_client).
  */
 function oidc_assert_response_type_allowed(array $client, string $responseType): void
 {
     $parts = oidc_scope_list($responseType);
+    if (in_array("token", $parts, true) && !oidc_front_channel_access_tokens_allowed()) {
+        throw new InvalidArgumentException(
+            "unsupported_response_type: response_type \"" .
+                trim($responseType) .
+                "\" returns an access token from the authorization endpoint, which this server does not do. " .
+                "Use response_type=code and get tokens from the token endpoint"
+        );
+    }
     $needed = [];
     if (in_array("code", $parts, true)) {
         $needed[] = "authorization_code";
@@ -1228,10 +1261,11 @@ function oidc_build_redirect_url(
 /**
  * PKCE rules for an authorization request (RFC 7636, RFC 9700 section 2.1.1). A
  * require_pkce client (every public client) must send a code_challenge whenever a
- * code is returned, and the method must be S256 or plain. Plain is refused for
- * public and require_pkce clients, and the challenge syntax is checked: 43
- * base64url characters for S256, 43-128 unreserved characters for plain.
- * legacy_oauth_flows keeps only the first two checks. Throws
+ * code is returned, and the method must be S256 or plain. Plain (also an omitted
+ * method, RFC 7636 section 4.3) is refused for every client; with
+ * oidc_plain_pkce_allowed() only for public and require_pkce clients. The challenge
+ * syntax is checked: 43 base64url characters for S256, 43-128 unreserved characters
+ * for plain. legacy_oauth_flows keeps only the first two checks. Throws
  * InvalidArgumentException.
  */
 function oidc_assert_pkce_request(
@@ -1262,10 +1296,10 @@ function oidc_assert_pkce_request(
     }
     if (
         $codeChallengeMethod !== "S256" &&
-        (!empty($client["is_public"]) || !empty($client["require_pkce"]))
+        (!empty($client["is_public"]) || !empty($client["require_pkce"]) || !oidc_plain_pkce_allowed())
     ) {
         throw new InvalidArgumentException(
-            "code_challenge_method=S256 is required for this OIDC client"
+            "code_challenge_method=S256 is required for this OIDC client (an omitted code_challenge_method means plain)"
         );
     }
     if ($codeChallengeMethod === "S256") {
