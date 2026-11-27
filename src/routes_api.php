@@ -1262,6 +1262,7 @@ function handle_api_routes(
                     "provider_permission" => $created["provider_permission"] ?? null,
                     "user_scope" => $created["user_scope"] ?? null,
                     "can_mint_tokens" => $created["can_mint_tokens"] ?? null,
+                    "allowed_ips" => $created["allowed_ips"] ?? [],
                     "expires_at" => $created["expires_at"] ?? null,
                 ]
             );
@@ -1329,7 +1330,7 @@ function handle_api_routes(
                 [
                     "name", "description", "provider_scope", "allowed_provider_ids",
                     "can_create_providers", "provider_permission", "user_scope",
-                    "can_mint_tokens", "status", "expires_in", "expires_at",
+                    "can_mint_tokens", "allowed_ips", "status", "expires_in", "expires_at",
                 ]
             ));
             admin_audit_append(
@@ -1347,6 +1348,7 @@ function handle_api_routes(
                     "provider_permission" => $updated["provider_permission"] ?? null,
                     "user_scope" => $updated["user_scope"] ?? null,
                     "can_mint_tokens" => $updated["can_mint_tokens"] ?? null,
+                    "allowed_ips" => $updated["allowed_ips"] ?? [],
                     "status" => $updated["status"] ?? null,
                 ]
             );

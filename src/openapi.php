@@ -37,7 +37,7 @@ function build_openapi_spec(string $baseUrl): array
                 "2. **API Key Header**: `X-API-Key: idp_adm_...`\n" .
                 "3. **HTTP Basic Auth**: `Authorization: Basic base64(client_id:client_secret)`\n" .
                 "4. **OAuth 2.0 Client Credentials**: Exchange `client_id` + `client_secret` at `POST /api/oauth2/token` (`grant_type=client_credentials`) for a short-lived `idp_at_...` Bearer token.\n\n" .
-                "An Admin API Client (and its access tokens) stops working as soon as its owner is removed from the administrator list (`users.txt`). The former per-administrator legacy API key (`Authorization: ApiKey <key>` at `POST /api/token`) is retired: it is no longer returned by the console and is accepted only while the operator sets `OIDC_LEGACY_ADMIN_API_KEY=1` (`legacy_admin_api_key` in config.php).\n\n" .
+                "An Admin API Client (and its access tokens) stops working as soon as its owner is removed from the administrator list (`users.txt`). A client with `allowed_ips` authenticates only from those addresses: from any other address its credentials get the same `401` as invalid ones, and the attempt is recorded in the owner's administrator audit log (`admin_client.source_denied`). The former per-administrator legacy API key (`Authorization: ApiKey <key>` at `POST /api/token`) is retired: it is no longer returned by the console and is accepted only while the operator sets `OIDC_LEGACY_ADMIN_API_KEY=1` (`legacy_admin_api_key` in config.php).\n\n" .
                 "Credentials are verified before any rate limit applies, and only failures are counted, per client address: after 12 failed credential checks within 5 minutes (10 at `POST /api/oauth2/token`), further failures from that address get `429` for 5 minutes. A valid credential is never refused by this limit. A request with a console session and an `Authorization` header that is not an Admin API client credential (for example the Basic credentials of an authentication gate in front of the console) is authenticated by its session.\n\n" .
                 "### Console Sessions and SCIM Credentials\n" .
                 "The Admin Console authenticates with its session cookie (`ConsoleSession`); state-changing requests made with the cookie also need the `X-CSRF-Token` header (`ConsoleCsrfToken`, the `csrfToken` value from `/api/me`). Managing Admin API Clients, reading the administrator audit log, and the IP allowlist status and blocked-request log accept **only** a console session: API clients get `403`. The hosted SCIM 2.0 server (`/{idpId}/scim/v2`) accepts a SCIM token (`idp_scim_...`) or an Admin API Client token (`idp_adm_...` / `idp_at_...`) that can access the provider and has `user_scope` `read` (`write` for changes), sent as `Authorization: Bearer` or `X-API-Key`; HTTP Basic and `Authorization: ApiKey` are not accepted there.\n\n" .
@@ -2039,6 +2039,7 @@ function build_openapi_spec(string $baseUrl): array
                         "provider_permission" => ["type" => "string", "enum" => ["read", "write"]],
                         "user_scope" => ["type" => "string", "enum" => ["none", "read", "write"]],
                         "can_mint_tokens" => ["type" => "boolean", "description" => "May mint JWTs at `POST /api/token`, import private signing keys, and manage OIDC clients that can use the `client_credentials` grant"],
+                        "allowed_ips" => ["type" => "array", "items" => ["type" => "string"], "example" => ["203.0.113.0/24", "2001:db8::/48"], "description" => "Normalized CIDR blocks this client may authenticate from; empty means any address. See `AdminApiClientCreateRequest.allowed_ips`."],
                         "status" => ["type" => "string", "enum" => ["active", "revoked"]],
                         "expires_at" => ["type" => ["string", "null"], "format" => "date-time"],
                         "is_expired" => ["type" => "boolean"],
@@ -2081,6 +2082,14 @@ function build_openapi_spec(string $baseUrl): array
                         "user_scope" => ["type" => "string", "enum" => ["none", "read", "write"], "default" => "none", "description" => "Access to the shared directory: `/api/users`, `/api/groups`, and SCIM tokens and connectors"],
                         "can_mint_tokens" => ["type" => "boolean", "default" => false, "description" => "Allow minting JWTs at `POST /api/token`, importing private signing keys (`keyMode: \"paste\"`), and creating, changing or rotating the secret of OIDC clients that can use the `client_credentials` grant. Clients created before this capability existed do not have it (unless the operator sets `OIDC_LEGACY_API_CLIENT_TOKEN_MINTING=1`, which lets every client with provider `write` permission do all of this)."],
                         "expires_in" => ["type" => ["string", "null"], "example" => "90d", "description" => "Optional lifetime of at most 365 days (`3600`, `7d`, `30d`, `90d`, `1w`, ...), a future ISO-8601 timestamp, or `never`; anything else is rejected with `400`"],
+                        "allowed_ips" => [
+                            "type" => "array",
+                            "items" => ["type" => "string"],
+                            "maxItems" => 50,
+                            "default" => [],
+                            "example" => ["203.0.113.0/24", "198.51.100.7"],
+                            "description" => "IPv4 and IPv6 addresses or CIDR blocks this client may authenticate from (also accepted as one string separated by spaces or commas). Stored normalized (`198.51.100.7` becomes `198.51.100.7/32`). Empty (the default) means any address. Checked on every request that presents the client's credential, its access tokens included, and at the client credentials exchange; a request from another address gets the same `401` as an invalid credential and is recorded in the owner's administrator audit log as `admin_client.source_denied`. The client address is REMOTE_ADDR, or the `X-Forwarded-For` client when REMOTE_ADDR is one of the operator's `trusted_proxies`. The operator's site-wide `ip_allowlist` applies first. Host names, wildcards and `a-b` ranges are rejected with `400`.",
+                        ],
                     ],
                 ],
                 "AdminApiClientUpdateRequest" => [
@@ -2095,6 +2104,7 @@ function build_openapi_spec(string $baseUrl): array
                         "provider_permission" => ["type" => "string", "enum" => ["read", "write"]],
                         "user_scope" => ["type" => "string", "enum" => ["none", "read", "write"]],
                         "can_mint_tokens" => ["type" => "boolean"],
+                        "allowed_ips" => ["type" => "array", "items" => ["type" => "string"], "maxItems" => 50, "description" => "Replaces the list; `[]` allows any address. See `AdminApiClientCreateRequest.allowed_ips`."],
                         "status" => ["type" => "string", "enum" => ["active", "revoked"]],
                         "expires_in" => ["type" => ["string", "null"]],
                     ],

@@ -10,7 +10,8 @@ declare(strict_types=1);
  *   3. OAuth 2.0 Client Credentials Grant (POST /api/oauth2/token -> Bearer idp_at_<token>)
  *
  * A client authenticates only while it is active and unexpired and its owner is still an
- * admin in users.txt (S10-04). Its secret is stored as machine_secret_hash() (X3-09).
+ * admin in users.txt (S10-04), and, when it has allowed_ips, only from those addresses
+ * (admin_client_source_allowed()). Its secret is stored as machine_secret_hash() (X3-09).
  */
 
 /**
@@ -24,6 +25,8 @@ declare(strict_types=1);
  *    provider write alone no longer implies token minting; the operator flag
  *    legacy_api_client_token_minting restores that (auth_require_token_minting()).
  *  - api.admin_mfa_totp_v1: admin_mfa_totp, the administrators' authenticator apps (G2a-07).
+ *  - api.admin_client_allowed_ips_v1: admin_api_clients.allowed_ips_json, the client's IP
+ *    allowlist (normalized CIDR blocks). Existing clients get [] (any address).
  */
 function admin_api_db(string $storePath): PDO
 {
@@ -60,6 +63,9 @@ function admin_api_db(string $storePath): PDO
         ],
         "api.admin_client_can_mint_tokens_v2" => [
             "ALTER TABLE admin_api_clients ADD COLUMN can_mint_tokens INTEGER NOT NULL DEFAULT 0",
+        ],
+        "api.admin_client_allowed_ips_v1" => [
+            "ALTER TABLE admin_api_clients ADD COLUMN allowed_ips_json TEXT NOT NULL DEFAULT '[]'",
         ],
         "api.admin_mfa_totp_v1" => [
             "CREATE TABLE IF NOT EXISTS admin_mfa_totp (" .
@@ -115,6 +121,8 @@ function hydrate_admin_api_client_row(array $r): array
         "user_scope" => (string) ($r["user_scope"] ?? "none"),
         // May mint JWTs at POST /api/token and import private signing keys (G1a-02).
         "can_mint_tokens" => (int) ($r["can_mint_tokens"] ?? 0) === 1,
+        // Normalized CIDR blocks the client may authenticate from; [] means any address.
+        "allowed_ips" => admin_client_stored_allowed_ips($r["allowed_ips_json"] ?? null),
         "status" => (string) ($r["status"] ?? "active"),
         "expires_at" => $exp,
         "is_expired" => $isExpired,
@@ -287,6 +295,75 @@ function admin_client_label_input(mixed $value, int $maxChars): string
     return is_scalar($value) ? sanitize_label((string) $value, $maxChars) : "";
 }
 
+/** Most entries an Admin API client's allowed_ips may hold (the whole list fits in an audit entry). */
+const ADMIN_CLIENT_MAX_ALLOWED_IPS = 50;
+
+/**
+ * Parses allowed_ips for an Admin API client: a list of IPv4 or IPv6 addresses or CIDR
+ * blocks, or one string split on whitespace and commas. Each entry goes through
+ * ip_allowlist_parse_range() (no host names, wildcards or "a-b" ranges) and is stored in
+ * its normalized form ("203.0.113.7/32", host bits cleared), without duplicates. Null, ""
+ * and [] give [] (any address). Throws InvalidArgumentException for anything else and for
+ * more than ADMIN_CLIENT_MAX_ALLOWED_IPS entries.
+ */
+function admin_client_allowed_ips_input(mixed $value): array
+{
+    if ($value === null || $value === "") {
+        return [];
+    }
+    if (is_string($value)) {
+        $value = preg_split('/[\s,]+/', $value, -1, PREG_SPLIT_NO_EMPTY) ?: [];
+    }
+    if (!is_array($value) || !array_is_list($value)) {
+        throw new InvalidArgumentException("allowed_ips must be a list of IP addresses or CIDR blocks");
+    }
+    $normalized = [];
+    foreach ($value as $entry) {
+        if (!is_string($entry)) {
+            throw new InvalidArgumentException("allowed_ips must be a list of IP addresses or CIDR blocks");
+        }
+        $entry = trim($entry);
+        if ($entry === "") {
+            continue;
+        }
+        $range = ip_allowlist_parse_range($entry);
+        if ($range === null) {
+            throw new InvalidArgumentException(
+                "allowed_ips: '" . sanitize_label($entry, 64) . "' is not an IPv4 or IPv6 address or CIDR block"
+            );
+        }
+        $normalized[$range["cidr"]] = true;
+        if (count($normalized) > ADMIN_CLIENT_MAX_ALLOWED_IPS) {
+            throw new InvalidArgumentException(
+                "allowed_ips holds at most " . ADMIN_CLIENT_MAX_ALLOWED_IPS . " entries"
+            );
+        }
+    }
+    return array_keys($normalized);
+}
+
+/**
+ * The stored allowed_ips_json of a client row as a list of CIDR strings. A missing column
+ * (the migration has not run) or an empty list gives [] (any address). A value that is not
+ * a JSON list of strings gives ["invalid"], which matches no address, so a damaged row
+ * refuses every request instead of allowing every address.
+ */
+function admin_client_stored_allowed_ips(mixed $json): array
+{
+    if ($json === null || $json === "" || $json === "[]") {
+        return [];
+    }
+    $decoded = json_decode((string) $json, true);
+    if (!is_array($decoded) || !array_is_list($decoded)) {
+        return ["invalid"];
+    }
+    $out = [];
+    foreach ($decoded as $entry) {
+        $out[] = is_string($entry) ? $entry : "invalid";
+    }
+    return $out;
+}
+
 function admin_client_list(string $storePath, string $owner): array
 {
     $pdo = admin_api_db($storePath);
@@ -355,6 +432,7 @@ function admin_client_create(
 
     // Token minting (and private key import) is opt-in for new clients (G1a-02).
     $canMintTokens = admin_client_bool_input($input, "can_mint_tokens", false);
+    $allowedIps = admin_client_allowed_ips_input($input["allowed_ips"] ?? null);
 
     $expiresAt = admin_client_parse_expires_input(
         $input["expires_in"] ?? ($input["expires_at"] ?? null)
@@ -369,9 +447,9 @@ function admin_client_create(
         "INSERT INTO admin_api_clients (" .
             "id, owner, name, description, client_id, token_id, secret_hash, secret_preview, " .
             "provider_scope, allowed_provider_ids_json, can_create_providers, provider_permission, " .
-            "user_scope, can_mint_tokens, status, expires_at, created_at" .
+            "user_scope, can_mint_tokens, allowed_ips_json, status, expires_at, created_at" .
         ") VALUES (" .
-            ":id, :owner, :name, :desc, :cid, :tid, :sh, :sprev, :ps, :pids, :ccp, :pperm, :us, :mint, 'active', :exp, :cat" .
+            ":id, :owner, :name, :desc, :cid, :tid, :sh, :sprev, :ps, :pids, :ccp, :pperm, :us, :mint, :ips, 'active', :exp, :cat" .
         ")"
     );
     $ins->execute([
@@ -389,6 +467,7 @@ function admin_client_create(
         ":pperm" => $providerPermission,
         ":us" => $userScope,
         ":mint" => $canMintTokens ? 1 : 0,
+        ":ips" => json_encode($allowedIps, JSON_UNESCAPED_SLASHES),
         ":exp" => $expiresAt,
         ":cat" => $now,
     ]);
@@ -481,6 +560,9 @@ function admin_client_update(
     $canMintTokens = array_key_exists("can_mint_tokens", $input)
         ? admin_client_bool_input($input, "can_mint_tokens", false)
         : !empty($existing["can_mint_tokens"]);
+    $allowedIps = array_key_exists("allowed_ips", $input)
+        ? admin_client_allowed_ips_input($input["allowed_ips"])
+        : (array) $existing["allowed_ips"];
 
     $expiresAt = $existing["expires_at"];
     if (array_key_exists("expires_in", $input) || array_key_exists("expires_at", $input)) {
@@ -494,7 +576,7 @@ function admin_client_update(
         "UPDATE admin_api_clients SET " .
             "name = :name, description = :desc, provider_scope = :ps, allowed_provider_ids_json = :pids, " .
             "can_create_providers = :ccp, provider_permission = :pperm, user_scope = :us, " .
-            "can_mint_tokens = :mint, status = :st, expires_at = :exp " .
+            "can_mint_tokens = :mint, allowed_ips_json = :ips, status = :st, expires_at = :exp " .
             "WHERE id = :id AND owner = :owner"
     );
     $upd->execute([
@@ -506,6 +588,7 @@ function admin_client_update(
         ":pperm" => $providerPermission,
         ":us" => $userScope,
         ":mint" => $canMintTokens ? 1 : 0,
+        ":ips" => json_encode(array_values($allowedIps), JSON_UNESCAPED_SLASHES),
         ":st" => $status,
         ":exp" => $expiresAt,
         ":id" => $id,
@@ -622,6 +705,115 @@ function admin_client_is_usable(array $client): bool
 }
 
 /**
+ * Whether this request may use $client: always when the client has no allowed_ips, otherwise
+ * only when the request's client address lies in one of them. The address is resolved the way
+ * the site-wide IP allowlist resolves it (ip_allowlist_client(): REMOTE_ADDR, or the
+ * X-Forwarded-For client behind trusted_proxies, read strictly); an address that cannot be
+ * resolved is refused, and so is every address when no stored entry parses.
+ */
+function admin_client_source_allowed(array $client): bool
+{
+    $allowed = (array) ($client["allowed_ips"] ?? []);
+    if ($allowed === []) {
+        return true;
+    }
+    $source = ip_allowlist_client();
+    $bin = $source["bin"] ?? null;
+    if (($source["problem"] ?? null) !== null || !is_string($bin)) {
+        return false;
+    }
+    $items = [];
+    foreach ($allowed as $entry) {
+        $range = is_string($entry) ? ip_allowlist_parse_range($entry) : null;
+        if ($range !== null) {
+            $items[] = ["range" => $range];
+        }
+    }
+    return ip_allowlist_match($bin, $items) !== null;
+}
+
+/**
+ * admin_client_source_allowed() for a client whose credential has just been verified. The
+ * caller treats a refusal like any failed authentication (the same 401, counted by the same
+ * failure limiter), so the response does not tell whoever holds the credential that it is
+ * valid. A refusal is recorded in the owner's admin audit log as admin_client.source_denied
+ * (security class). The holder of a leaked credential can repeat the request at will, from
+ * many addresses, so at most 5 rows per client and address are written in 10 minutes, and at
+ * most 20 per client in an hour. The rate-limit and audit writes run after the response has
+ * been sent (admin_client_after_response()), so an invalid credential and a valid one from
+ * another address also take the same time to answer. Never throws; an error refuses.
+ */
+function admin_client_source_check(string $storePath, array $client): bool
+{
+    try {
+        if (admin_client_source_allowed($client)) {
+            return true;
+        }
+        $source = ip_allowlist_client();
+    } catch (Throwable $e) {
+        error_log("admin API client source check failed (" . get_class($e) . ")");
+        return false;
+    }
+    if ($storePath === "") {
+        return false;
+    }
+    $clientKey = (string) ($client["id"] ?? "");
+    // Throttled per client and per the address the decision used (client_ip_bucket() of the
+    // strictly resolved address; the connection's address when it has none), and per client.
+    $addressBucket = client_ip_bucket(is_string($source["ip"] ?? null) ? $source["ip"] : null);
+    $details = [
+        "reason" => ($source["problem"] ?? null) !== null
+            ? "client address not resolvable (" . (string) $source["problem"] . ")"
+            : "client address not in allowed_ips",
+        "address" => $source["ip"] ?? null,
+    ];
+    admin_client_after_response(static function () use ($storePath, $client, $clientKey, $addressBucket, $details): void {
+        try {
+            if (
+                rate_limit_hit($storePath, rate_limit_bucket("admin_client_src_audit", $clientKey, $addressBucket), 5, 600, 600) ||
+                rate_limit_hit($storePath, rate_limit_bucket("admin_client_src_audit_all", $clientKey), 20, 3600, 3600)
+            ) {
+                return;
+            }
+            admin_audit_append(
+                $storePath,
+                ["type" => "api_client", "owner" => (string) ($client["owner"] ?? ""), "client" => $client],
+                "admin_client.source_denied",
+                "failure",
+                null,
+                (string) ($client["client_id"] ?? ""),
+                $details
+            );
+        } catch (Throwable $e) {
+            error_log("admin API client source refusal not audited (" . get_class($e) . ")");
+        }
+    });
+    return false;
+}
+
+/**
+ * Runs $task once the response has been sent: at shutdown, after fastcgi_finish_request() or
+ * litespeed_finish_request() where the SAPI has one (elsewhere, such as php -S, it still runs
+ * at shutdown, before the output is flushed), with ignore_user_abort() on so a client that
+ * disconnects does not cut it short. Use it for writes whose timing must not show in the
+ * response. Errors are the task's to handle.
+ */
+function admin_client_after_response(callable $task): void
+{
+    register_shutdown_function(static function () use ($task): void {
+        if (function_exists("ignore_user_abort")) {
+            ignore_user_abort(true);
+        }
+        if (function_exists("fastcgi_finish_request")) {
+            @fastcgi_finish_request();
+        } elseif (function_exists("litespeed_finish_request")) {
+            @litespeed_finish_request();
+        }
+        $task();
+    });
+}
+
+/**
  * Verifies $secretToVerify against a client row looked up by its public id (token_id or
  * client_id) and returns the hydrated client if it may authenticate. Secrets are
  * machine_secret_hash() digests (X3-09); a legacy bcrypt digest that verifies is replaced
@@ -683,7 +875,10 @@ function admin_client_verify_active_row(
         }
     }
     $hydrated = hydrate_admin_api_client_row($row);
-    return admin_client_is_usable($hydrated) ? $hydrated : null;
+    if (!admin_client_is_usable($hydrated) || !admin_client_source_check($storePath, $hydrated)) {
+        return null;
+    }
+    return $hydrated;
 }
 
 /**
@@ -729,7 +924,7 @@ function admin_client_verify_by_token(string $storePath, string $rawToken, ?stri
             return null;
         }
         $hydrated = hydrate_admin_api_client_row($row);
-        if (!admin_client_is_usable($hydrated)) {
+        if (!admin_client_is_usable($hydrated) || !admin_client_source_check($storePath, $hydrated)) {
             return null;
         }
         admin_client_touch_usage($storePath, $hydrated["id"]);

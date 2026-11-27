@@ -3658,6 +3658,8 @@ function AdminApiClientDialog({ open, onClose, providers, editingClient, onSaved
     // Off by default (G1a-02): minting JWTs (/api/token), importing private keys and managing
     // client_credentials clients need it.
     can_mint_tokens: false,
+    // One address or CIDR block per line (or comma separated); empty allows any address.
+    allowed_ips_text: '',
     provider_permission: 'write',
     user_scope: 'none',
     status: 'active',
@@ -3677,6 +3679,7 @@ function AdminApiClientDialog({ open, onClose, providers, editingClient, onSaved
         allowed_provider_ids: [...(editingClient.allowed_provider_ids || [])],
         can_create_providers: !!editingClient.can_create_providers,
         can_mint_tokens: editingClient.can_mint_tokens === true,
+        allowed_ips_text: (editingClient.allowed_ips || []).join('\n'),
         provider_permission: editingClient.provider_permission || 'write',
         user_scope: editingClient.user_scope || 'none',
         status: editingClient.status || 'active',
@@ -3710,6 +3713,7 @@ function AdminApiClientDialog({ open, onClose, providers, editingClient, onSaved
       allowed_provider_ids: form.provider_scope === 'all' ? [] : form.allowed_provider_ids,
       can_create_providers: form.provider_scope === 'all' ? true : !!form.can_create_providers,
       can_mint_tokens: form.can_mint_tokens === true,
+      allowed_ips: form.allowed_ips_text.split(/[\s,]+/).map(s => s.trim()).filter(Boolean),
       provider_permission: form.provider_permission,
       user_scope: form.user_scope,
       status: form.status,
@@ -3826,6 +3830,18 @@ function AdminApiClientDialog({ open, onClose, providers, editingClient, onSaved
             <Typography variant="caption" color="text.secondary" sx={{ display: 'block', ml: 4 }}>
               API clients created before this capability existed do not have it: they cannot mint tokens until an administrator ticks this box.
             </Typography>
+          </Grid>
+
+          <Grid item xs={12}>
+            <TextField
+              fullWidth multiline minRows={2} maxRows={8}
+              label="Allowed IP addresses (optional)"
+              placeholder={'203.0.113.0/24\n2001:db8::/48'}
+              value={form.allowed_ips_text}
+              onChange={e => setForm({ ...form, allowed_ips_text: e.target.value })}
+              inputProps={{ className: 'mono', spellCheck: false }}
+              helperText="One IPv4 or IPv6 address or CIDR block per line, at most 50. Empty allows any address. A request with this client's credentials from another address is refused like an invalid credential and recorded in the audit log."
+            />
           </Grid>
 
           <Grid item xs={12} md={editingClient ? 6 : 12}>
@@ -4003,6 +4019,9 @@ function DeveloperApiPanel({ me, providers, onOpenJwt, onNotify }) {
                       {c.can_mint_tokens === true && (
                         <Chip size="small" color="warning" variant="outlined" label="Can Mint Tokens" />
                       )}
+                      {(c.allowed_ips || []).length > 0 && (
+                        <Chip size="small" color="info" variant="outlined" label="IP-Restricted" />
+                      )}
                     </Box>
 
                     {c.description && (
@@ -4030,6 +4049,17 @@ function DeveloperApiPanel({ me, providers, onOpenJwt, onNotify }) {
                         </>
                       )}
                     </Box>
+
+                    {(c.allowed_ips || []).length > 0 && (
+                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, flexWrap: 'wrap', mt: 1 }}>
+                        <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700 }}>
+                          ALLOWED IPS:
+                        </Typography>
+                        {c.allowed_ips.map(ip => (
+                          <Chip key={ip} size="small" variant="outlined" className="mono" label={ip} sx={{ height: 22, fontSize: 11.5 }} />
+                        ))}
+                      </Box>
+                    )}
 
                     <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
                       Created {relativeTime(c.created_at)}
