@@ -27,6 +27,8 @@ declare(strict_types=1);
  *  - api.admin_mfa_totp_v1: admin_mfa_totp, the administrators' authenticator apps (G2a-07).
  *  - api.admin_client_allowed_ips_v1: admin_api_clients.allowed_ips_json, the client's IP
  *    allowlist (normalized CIDR blocks). Existing clients get [] (any address).
+ *  - api.admin_client_can_read_admin_audit_v1: admin_api_clients.can_read_admin_audit, whether
+ *    the client may read its owner's administrator audit log. Existing clients get 0.
  */
 function admin_api_db(string $storePath): PDO
 {
@@ -66,6 +68,9 @@ function admin_api_db(string $storePath): PDO
         ],
         "api.admin_client_allowed_ips_v1" => [
             "ALTER TABLE admin_api_clients ADD COLUMN allowed_ips_json TEXT NOT NULL DEFAULT '[]'",
+        ],
+        "api.admin_client_can_read_admin_audit_v1" => [
+            "ALTER TABLE admin_api_clients ADD COLUMN can_read_admin_audit INTEGER NOT NULL DEFAULT 0",
         ],
         "api.admin_mfa_totp_v1" => [
             "CREATE TABLE IF NOT EXISTS admin_mfa_totp (" .
@@ -121,6 +126,8 @@ function hydrate_admin_api_client_row(array $r): array
         "user_scope" => (string) ($r["user_scope"] ?? "none"),
         // May mint JWTs at POST /api/token and import private signing keys (G1a-02).
         "can_mint_tokens" => (int) ($r["can_mint_tokens"] ?? 0) === 1,
+        // May read the owner's administrator audit log (GET /api/admin-audit-logs).
+        "can_read_admin_audit" => (int) ($r["can_read_admin_audit"] ?? 0) === 1,
         // Normalized CIDR blocks the client may authenticate from; [] means any address.
         "allowed_ips" => admin_client_stored_allowed_ips($r["allowed_ips_json"] ?? null),
         "status" => (string) ($r["status"] ?? "active"),
@@ -433,6 +440,8 @@ function admin_client_create(
     // Token minting (and private key import) is opt-in for new clients (G1a-02).
     $canMintTokens = admin_client_bool_input($input, "can_mint_tokens", false);
     $allowedIps = admin_client_allowed_ips_input($input["allowed_ips"] ?? null);
+    // Reading the administrator audit log is opt-in.
+    $canReadAdminAudit = admin_client_bool_input($input, "can_read_admin_audit", false);
 
     $expiresAt = admin_client_parse_expires_input(
         $input["expires_in"] ?? ($input["expires_at"] ?? null)
@@ -447,9 +456,9 @@ function admin_client_create(
         "INSERT INTO admin_api_clients (" .
             "id, owner, name, description, client_id, token_id, secret_hash, secret_preview, " .
             "provider_scope, allowed_provider_ids_json, can_create_providers, provider_permission, " .
-            "user_scope, can_mint_tokens, allowed_ips_json, status, expires_at, created_at" .
+            "user_scope, can_mint_tokens, can_read_admin_audit, allowed_ips_json, status, expires_at, created_at" .
         ") VALUES (" .
-            ":id, :owner, :name, :desc, :cid, :tid, :sh, :sprev, :ps, :pids, :ccp, :pperm, :us, :mint, :ips, 'active', :exp, :cat" .
+            ":id, :owner, :name, :desc, :cid, :tid, :sh, :sprev, :ps, :pids, :ccp, :pperm, :us, :mint, :audit, :ips, 'active', :exp, :cat" .
         ")"
     );
     $ins->execute([
@@ -467,6 +476,7 @@ function admin_client_create(
         ":pperm" => $providerPermission,
         ":us" => $userScope,
         ":mint" => $canMintTokens ? 1 : 0,
+        ":audit" => $canReadAdminAudit ? 1 : 0,
         ":ips" => json_encode($allowedIps, JSON_UNESCAPED_SLASHES),
         ":exp" => $expiresAt,
         ":cat" => $now,
@@ -563,6 +573,9 @@ function admin_client_update(
     $allowedIps = array_key_exists("allowed_ips", $input)
         ? admin_client_allowed_ips_input($input["allowed_ips"])
         : (array) $existing["allowed_ips"];
+    $canReadAdminAudit = array_key_exists("can_read_admin_audit", $input)
+        ? admin_client_bool_input($input, "can_read_admin_audit", false)
+        : !empty($existing["can_read_admin_audit"]);
 
     $expiresAt = $existing["expires_at"];
     if (array_key_exists("expires_in", $input) || array_key_exists("expires_at", $input)) {
@@ -576,7 +589,8 @@ function admin_client_update(
         "UPDATE admin_api_clients SET " .
             "name = :name, description = :desc, provider_scope = :ps, allowed_provider_ids_json = :pids, " .
             "can_create_providers = :ccp, provider_permission = :pperm, user_scope = :us, " .
-            "can_mint_tokens = :mint, allowed_ips_json = :ips, status = :st, expires_at = :exp " .
+            "can_mint_tokens = :mint, can_read_admin_audit = :audit, allowed_ips_json = :ips, " .
+            "status = :st, expires_at = :exp " .
             "WHERE id = :id AND owner = :owner"
     );
     $upd->execute([
@@ -588,6 +602,7 @@ function admin_client_update(
         ":pperm" => $providerPermission,
         ":us" => $userScope,
         ":mint" => $canMintTokens ? 1 : 0,
+        ":audit" => $canReadAdminAudit ? 1 : 0,
         ":ips" => json_encode(array_values($allowedIps), JSON_UNESCAPED_SLASHES),
         ":st" => $status,
         ":exp" => $expiresAt,
@@ -1159,6 +1174,23 @@ function auth_require_session_only(array $auth): string
     return (string) $auth["owner"];
 }
 
+/**
+ * The administrator whose audit log $auth may read: a console session reads its own, an
+ * Admin API client with can_read_admin_audit its owner's. Any other caller gets 403.
+ */
+function auth_require_admin_audit_reader(array $auth): string
+{
+    if (($auth["type"] ?? "") === "session") {
+        return (string) $auth["owner"];
+    }
+    if (($auth["type"] ?? "") === "api_client" && !empty($auth["client"]["can_read_admin_audit"])) {
+        return (string) $auth["owner"];
+    }
+    json_response(403, [
+        "error" => "Reading the administrator audit log requires a console session or an Admin API client with can_read_admin_audit",
+    ]);
+}
+
 function auth_can_access_provider(
     array $auth,
     string $providerId,
@@ -1541,21 +1573,27 @@ function admin_audit_prune(PDO $pdo, string $class, string $owner): void
 }
 
 /**
- * The newest admin audit rows of $owner (actions by the owner's session and API clients,
- * failed logins with the owner's username, and sign-in alerts), newest first.
+ * Admin audit rows of $owner (actions by the owner's session and API clients, failed logins
+ * with the owner's username, and sign-in alerts). Without $sinceId the newest $limit rows,
+ * newest first. With $sinceId the oldest $limit rows whose id is greater, oldest first, so a
+ * collector can page forward by passing the last id it received and never skips a row.
  */
-function admin_audit_list(string $storePath, string $owner, int $limit = 100): array
+function admin_audit_list(string $storePath, string $owner, int $limit = 100, ?int $sinceId = null): array
 {
     $pdo = admin_api_db($storePath);
-    $stmt = $pdo->prepare(
-        "SELECT id, created_at, actor_type, actor_id, actor_name, source_ip, user_agent, action, outcome, " .
-            "provider_id, target, details_json, audit_class FROM admin_audit_logs WHERE owner = :owner " .
-            "ORDER BY id DESC LIMIT :lim"
-    );
-    storage_execute($stmt, [
+    $columns = "SELECT id, created_at, actor_type, actor_id, actor_name, source_ip, user_agent, action, outcome, " .
+        "provider_id, target, details_json, audit_class FROM admin_audit_logs WHERE owner = :owner ";
+    $params = [
         ":owner" => admin_audit_owner_key($owner),
         ":lim" => max(1, min(500, $limit)),
-    ]);
+    ];
+    if ($sinceId !== null) {
+        $stmt = $pdo->prepare($columns . "AND id > :since ORDER BY id ASC LIMIT :lim");
+        $params[":since"] = max(0, $sinceId);
+    } else {
+        $stmt = $pdo->prepare($columns . "ORDER BY id DESC LIMIT :lim");
+    }
+    storage_execute($stmt, $params);
     $rows = [];
     while ($r = $stmt->fetch(PDO::FETCH_ASSOC)) {
         $details = json_decode((string) ($r["details_json"] ?? "{}"), true);

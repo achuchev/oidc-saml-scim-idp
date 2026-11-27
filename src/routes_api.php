@@ -1262,6 +1262,7 @@ function handle_api_routes(
                     "provider_permission" => $created["provider_permission"] ?? null,
                     "user_scope" => $created["user_scope"] ?? null,
                     "can_mint_tokens" => $created["can_mint_tokens"] ?? null,
+                    "can_read_admin_audit" => $created["can_read_admin_audit"] ?? null,
                     "allowed_ips" => $created["allowed_ips"] ?? [],
                     "expires_at" => $created["expires_at"] ?? null,
                 ]
@@ -1330,7 +1331,7 @@ function handle_api_routes(
                 [
                     "name", "description", "provider_scope", "allowed_provider_ids",
                     "can_create_providers", "provider_permission", "user_scope",
-                    "can_mint_tokens", "allowed_ips", "status", "expires_in", "expires_at",
+                    "can_mint_tokens", "can_read_admin_audit", "allowed_ips", "status", "expires_in", "expires_at",
                 ]
             ));
             admin_audit_append(
@@ -1348,6 +1349,7 @@ function handle_api_routes(
                     "provider_permission" => $updated["provider_permission"] ?? null,
                     "user_scope" => $updated["user_scope"] ?? null,
                     "can_mint_tokens" => $updated["can_mint_tokens"] ?? null,
+                    "can_read_admin_audit" => $updated["can_read_admin_audit"] ?? null,
                     "allowed_ips" => $updated["allowed_ips"] ?? [],
                     "status" => $updated["status"] ?? null,
                 ]
@@ -1373,15 +1375,23 @@ function handle_api_routes(
         }
     }
 
-    // ---------- Admin Audit Log (G1a-01) [Session Admin Only] ----------
+    // ---------- Admin Audit Log (G1a-01) [Session Admin, or API Client with can_read_admin_audit] ----------
     if ($path === "/api/admin-audit-logs" && $method === "GET") {
         $auth = require_admin_auth($PROVIDERS_FILE, $origin);
-        $owner = auth_require_session_only($auth);
+        $owner = auth_require_admin_audit_reader($auth);
         $lim = isset($_GET["limit"]) && is_string($_GET["limit"])
             ? max(1, min(500, (int) $_GET["limit"]))
             : 100;
+        $sinceId = null;
+        if (isset($_GET["since_id"])) {
+            $rawSince = $_GET["since_id"];
+            if (!is_string($rawSince) || preg_match('/^\d{1,18}$/D', $rawSince) !== 1) {
+                json_response(400, ["error" => "since_id must be a non-negative integer (the id of the last entry received)"]);
+            }
+            $sinceId = (int) $rawSince;
+        }
         json_response(200, [
-            "logs" => admin_audit_list($PROVIDERS_FILE, $owner, $lim),
+            "logs" => admin_audit_list($PROVIDERS_FILE, $owner, $lim, $sinceId),
         ]);
     }
 

@@ -40,7 +40,7 @@ function build_openapi_spec(string $baseUrl): array
                 "An Admin API Client (and its access tokens) stops working as soon as its owner is removed from the administrator list (`users.txt`). A client with `allowed_ips` authenticates only from those addresses: from any other address its credentials get the same `401` as invalid ones, and the attempt is recorded in the owner's administrator audit log (`admin_client.source_denied`). The former per-administrator legacy API key (`Authorization: ApiKey <key>` at `POST /api/token`) is retired: it is no longer returned by the console and is accepted only while the operator sets `OIDC_LEGACY_ADMIN_API_KEY=1` (`legacy_admin_api_key` in config.php).\n\n" .
                 "Credentials are verified before any rate limit applies, and only failures are counted, per client address: after 12 failed credential checks within 5 minutes (10 at `POST /api/oauth2/token`), further failures from that address get `429` for 5 minutes. A valid credential is never refused by this limit. A request with a console session and an `Authorization` header that is not an Admin API client credential (for example the Basic credentials of an authentication gate in front of the console) is authenticated by its session.\n\n" .
                 "### Console Sessions and SCIM Credentials\n" .
-                "The Admin Console authenticates with its session cookie (`ConsoleSession`); state-changing requests made with the cookie also need the `X-CSRF-Token` header (`ConsoleCsrfToken`, the `csrfToken` value from `/api/me`). Managing Admin API Clients, reading the administrator audit log, and the IP allowlist status and blocked-request log accept **only** a console session: API clients get `403`. The hosted SCIM 2.0 server (`/{idpId}/scim/v2`) accepts a SCIM token (`idp_scim_...`) or an Admin API Client token (`idp_adm_...` / `idp_at_...`) that can access the provider and has `user_scope` `read` (`write` for changes), sent as `Authorization: Bearer` or `X-API-Key`; HTTP Basic and `Authorization: ApiKey` are not accepted there.\n\n" .
+                "The Admin Console authenticates with its session cookie (`ConsoleSession`); state-changing requests made with the cookie also need the `X-CSRF-Token` header (`ConsoleCsrfToken`, the `csrfToken` value from `/api/me`). Managing Admin API Clients and the IP allowlist status and blocked-request log accept **only** a console session: API clients get `403`. The administrator audit log (`GET /api/admin-audit-logs`) accepts a console session or an Admin API client that an administrator granted `can_read_admin_audit`. The hosted SCIM 2.0 server (`/{idpId}/scim/v2`) accepts a SCIM token (`idp_scim_...`) or an Admin API Client token (`idp_adm_...` / `idp_at_...`) that can access the provider and has `user_scope` `read` (`write` for changes), sent as `Authorization: Bearer` or `X-API-Key`; HTTP Basic and `Authorization: ApiKey` are not accepted there.\n\n" .
                 "### Provider-Level Scoping\n" .
                 "Each Admin API Client can be restricted to **one or more specific providers** (`provider_scope: \"selected\"`, `allowed_provider_ids: [...]`) or granted access to **all providers** (`provider_scope: \"all\"`), with independent read/write controls and optional `can_create_providers` auto-granting.\n\n" .
                 "### Directory Access and Capabilities\n" .
@@ -551,15 +551,23 @@ function build_openapi_spec(string $baseUrl): array
                 "get" => [
                     "tags" => ["Audit Logs & Workload JWTs"],
                     "summary" => "List Administrator Audit Log",
-                    "description" => "Console session only. The newest administrative events of the signed-in administrator: console logins (including failed attempts with this username), Admin API client changes and secret rotations, `/api/token` mints (jti, sub, aud, exp, kid and extra claim names), provider, key, certificate, client, application, user, group, SCIM token and connector changes. Each entry names the actor (session administrator, API client or legacy key owner), source IP and user agent. Secrets are never recorded. Entries survive the deletion of the provider they concern.\n\n" .
-                        "Retention by `audit_class`: `security` entries (every change, sign-in, mint and alert) are kept for 365 days; beyond the newest 20000 of an administrator only entries older than 90 days are removed, so no actor can push its own recent actions out of the log. `routine` entries (`admin_client.token_issued`, one per client credentials exchange) keep the newest 2000 per administrator, and `untrusted` entries (unauthenticated failures, such as failed sign-ins with this username) the newest 500 per administrator; both expire after 90 days and never remove entries of another class.",
-                    "security" => [["ConsoleSession" => []]],
+                    "description" => "A console session reads the signed-in administrator's log; an Admin API client needs `can_read_admin_audit` and reads its owner's log (other clients get `403`). Administrative events: console logins (including failed attempts with this username), Admin API client changes and secret rotations, `/api/token` mints (jti, sub, aud, exp, kid and extra claim names), provider, key, certificate, client, application, user, group, SCIM token and connector changes. Each entry names the actor (session administrator, API client or legacy key owner), source IP and user agent. Secrets are never recorded. Entries survive the deletion of the provider they concern.\n\n" .
+                        "Retention by `audit_class`: `security` entries (every change, sign-in, mint and alert) are kept for 365 days; beyond the newest 20000 of an administrator only entries older than 90 days are removed, so no actor can push its own recent actions out of the log. `routine` entries (`admin_client.token_issued`, one per client credentials exchange) keep the newest 2000 per administrator, and `untrusted` entries (unauthenticated failures, such as failed sign-ins with this username) the newest 500 per administrator; both expire after 90 days and never remove entries of another class.\n\n" .
+                        "Collecting the log (for example into a SIEM): pass `since_id=0` first, then the largest `id` received. With `since_id` the entries come oldest first and only those with a greater `id`, so no entry is skipped; an empty `logs` array means there is nothing new. Reading the log is not itself recorded.",
+                    "security" => [
+                        ["ConsoleSession" => []],
+                        ["BearerToken" => []],
+                        ["ApiKeyHeader" => []],
+                        ["BasicClientCredentials" => []],
+                        ["OAuth2ClientCredentials" => []],
+                    ],
                     "parameters" => [
                         ["name" => "limit", "in" => "query", "required" => false, "schema" => ["type" => "integer", "default" => 100, "minimum" => 1, "maximum" => 500]],
+                        ["name" => "since_id", "in" => "query", "required" => false, "schema" => ["type" => "integer", "minimum" => 0], "description" => "Return the entries with a greater `id`, oldest first (at most `limit`). Without it, the newest entries come first. Anything but digits is rejected with `400`."],
                     ],
                     "responses" => [
                         "200" => [
-                            "description" => "Audit entries, newest first",
+                            "description" => "Audit entries: newest first, or oldest first with `since_id`",
                             "content" => [
                                 "application/json" => [
                                     "schema" => [
@@ -571,7 +579,11 @@ function build_openapi_spec(string $baseUrl): array
                                 ],
                             ],
                         ],
-                        "403" => ['$ref' => "#/components/responses/ConsoleSessionRequired"],
+                        "400" => ['$ref' => "#/components/responses/BadRequest"],
+                        "403" => [
+                            "description" => "An Admin API client without `can_read_admin_audit`",
+                            "content" => ["application/json" => ["schema" => ['$ref' => "#/components/schemas/ErrorResponse"]]],
+                        ],
                     ],
                 ],
             ],
@@ -1807,7 +1819,7 @@ function build_openapi_spec(string $baseUrl): array
                     "type" => "apiKey",
                     "in" => "cookie",
                     "name" => $sessionCookie,
-                    "description" => "Interactive Admin Console session, created by signing in to the console (`__Host-IDPSESSID` over https, `IDPSESSID` over plain http). Browsers send it automatically on same-origin requests; scripts cannot set it. Requests that change state also need `ConsoleCsrfToken`. Required (and the only accepted credential) for Admin API Client management, the administrator audit log, and the IP allowlist status and blocked-request log.",
+                    "description" => "Interactive Admin Console session, created by signing in to the console (`__Host-IDPSESSID` over https, `IDPSESSID` over plain http). Browsers send it automatically on same-origin requests; scripts cannot set it. Requests that change state also need `ConsoleCsrfToken`. Required (and the only accepted credential) for Admin API Client management and the IP allowlist status and blocked-request log. The administrator audit log also accepts Admin API clients with `can_read_admin_audit`.",
                 ],
                 "ConsoleCsrfToken" => [
                     "type" => "apiKey",
@@ -2039,6 +2051,7 @@ function build_openapi_spec(string $baseUrl): array
                         "provider_permission" => ["type" => "string", "enum" => ["read", "write"]],
                         "user_scope" => ["type" => "string", "enum" => ["none", "read", "write"]],
                         "can_mint_tokens" => ["type" => "boolean", "description" => "May mint JWTs at `POST /api/token`, import private signing keys, and manage OIDC clients that can use the `client_credentials` grant"],
+                        "can_read_admin_audit" => ["type" => "boolean", "description" => "May read its owner's administrator audit log (`GET /api/admin-audit-logs`)"],
                         "allowed_ips" => ["type" => "array", "items" => ["type" => "string"], "example" => ["203.0.113.0/24", "2001:db8::/48"], "description" => "Normalized CIDR blocks this client may authenticate from; empty means any address. See `AdminApiClientCreateRequest.allowed_ips`."],
                         "status" => ["type" => "string", "enum" => ["active", "revoked"]],
                         "expires_at" => ["type" => ["string", "null"], "format" => "date-time"],
@@ -2063,7 +2076,7 @@ function build_openapi_spec(string $baseUrl): array
                 "AdminApiClientCreateRequest" => [
                     "type" => "object",
                     "required" => ["name"],
-                    "description" => "Unknown values of the enumerated fields, and boolean fields (`can_create_providers`, `can_mint_tokens`) other than `true`/`false` (or `1`/`0`), are rejected with `400`.",
+                    "description" => "Unknown values of the enumerated fields, and boolean fields (`can_create_providers`, `can_mint_tokens`, `can_read_admin_audit`) other than `true`/`false` (or `1`/`0`), are rejected with `400`.",
                     "properties" => [
                         "name" => ["type" => "string", "maxLength" => 120, "example" => "Multi-Provider Config Automation"],
                         "description" => ["type" => "string", "maxLength" => 280, "example" => "Manages staging and QA SAML/OIDC apps"],
@@ -2082,6 +2095,7 @@ function build_openapi_spec(string $baseUrl): array
                         "user_scope" => ["type" => "string", "enum" => ["none", "read", "write"], "default" => "none", "description" => "Access to the shared directory: `/api/users`, `/api/groups`, and SCIM tokens and connectors"],
                         "can_mint_tokens" => ["type" => "boolean", "default" => false, "description" => "Allow minting JWTs at `POST /api/token`, importing private signing keys (`keyMode: \"paste\"`), and creating, changing or rotating the secret of OIDC clients that can use the `client_credentials` grant. Clients created before this capability existed do not have it (unless the operator sets `OIDC_LEGACY_API_CLIENT_TOKEN_MINTING=1`, which lets every client with provider `write` permission do all of this)."],
                         "expires_in" => ["type" => ["string", "null"], "example" => "90d", "description" => "Optional lifetime of at most 365 days (`3600`, `7d`, `30d`, `90d`, `1w`, ...), a future ISO-8601 timestamp, or `never`; anything else is rejected with `400`"],
+                        "can_read_admin_audit" => ["type" => "boolean", "default" => false, "description" => "Allow reading the owner's administrator audit log (`GET /api/admin-audit-logs`): every administrative action of the owner's console sessions and API clients, sign-in attempts with the owner's name, source addresses and user agents. Off by default."],
                         "allowed_ips" => [
                             "type" => "array",
                             "items" => ["type" => "string"],
@@ -2094,7 +2108,7 @@ function build_openapi_spec(string $baseUrl): array
                 ],
                 "AdminApiClientUpdateRequest" => [
                     "type" => "object",
-                    "description" => "Unknown values of the enumerated fields, and boolean fields (`can_create_providers`, `can_mint_tokens`) other than `true`/`false` (or `1`/`0`), are rejected with `400`.",
+                    "description" => "Unknown values of the enumerated fields, and boolean fields (`can_create_providers`, `can_mint_tokens`, `can_read_admin_audit`) other than `true`/`false` (or `1`/`0`), are rejected with `400`.",
                     "properties" => [
                         "name" => ["type" => "string", "maxLength" => 120],
                         "description" => ["type" => "string", "maxLength" => 280],
@@ -2104,6 +2118,7 @@ function build_openapi_spec(string $baseUrl): array
                         "provider_permission" => ["type" => "string", "enum" => ["read", "write"]],
                         "user_scope" => ["type" => "string", "enum" => ["none", "read", "write"]],
                         "can_mint_tokens" => ["type" => "boolean"],
+                        "can_read_admin_audit" => ["type" => "boolean"],
                         "allowed_ips" => ["type" => "array", "items" => ["type" => "string"], "maxItems" => 50, "description" => "Replaces the list; `[]` allows any address. See `AdminApiClientCreateRequest.allowed_ips`."],
                         "status" => ["type" => "string", "enum" => ["active", "revoked"]],
                         "expires_in" => ["type" => ["string", "null"]],

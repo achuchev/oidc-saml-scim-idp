@@ -3658,6 +3658,8 @@ function AdminApiClientDialog({ open, onClose, providers, editingClient, onSaved
     // Off by default (G1a-02): minting JWTs (/api/token), importing private keys and managing
     // client_credentials clients need it.
     can_mint_tokens: false,
+    // Off by default: reading the owner's administrator audit log (GET /api/admin-audit-logs).
+    can_read_admin_audit: false,
     // One address or CIDR block per line (or comma separated); empty allows any address.
     allowed_ips_text: '',
     provider_permission: 'write',
@@ -3679,6 +3681,7 @@ function AdminApiClientDialog({ open, onClose, providers, editingClient, onSaved
         allowed_provider_ids: [...(editingClient.allowed_provider_ids || [])],
         can_create_providers: !!editingClient.can_create_providers,
         can_mint_tokens: editingClient.can_mint_tokens === true,
+        can_read_admin_audit: editingClient.can_read_admin_audit === true,
         allowed_ips_text: (editingClient.allowed_ips || []).join('\n'),
         provider_permission: editingClient.provider_permission || 'write',
         user_scope: editingClient.user_scope || 'none',
@@ -3713,6 +3716,7 @@ function AdminApiClientDialog({ open, onClose, providers, editingClient, onSaved
       allowed_provider_ids: form.provider_scope === 'all' ? [] : form.allowed_provider_ids,
       can_create_providers: form.provider_scope === 'all' ? true : !!form.can_create_providers,
       can_mint_tokens: form.can_mint_tokens === true,
+      can_read_admin_audit: form.can_read_admin_audit === true,
       allowed_ips: form.allowed_ips_text.split(/[\s,]+/).map(s => s.trim()).filter(Boolean),
       provider_permission: form.provider_permission,
       user_scope: form.user_scope,
@@ -3829,6 +3833,16 @@ function AdminApiClientDialog({ open, onClose, providers, editingClient, onSaved
             />
             <Typography variant="caption" color="text.secondary" sx={{ display: 'block', ml: 4 }}>
               API clients created before this capability existed do not have it: they cannot mint tokens until an administrator ticks this box.
+            </Typography>
+          </Grid>
+
+          <Grid item xs={12}>
+            <FormControlLabel
+              control={<Checkbox size="small" checked={form.can_read_admin_audit === true} onChange={e => setForm({ ...form, can_read_admin_audit: e.target.checked })} />}
+              label="Can read the administrator audit log: GET /api/admin-audit-logs (for example to collect it into a SIEM)"
+            />
+            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', ml: 4 }}>
+              The log covers all of your administrative activity: console sign-ins, every API client's actions, source addresses and user agents. Secrets are never recorded.
             </Typography>
           </Grid>
 
@@ -4018,6 +4032,9 @@ function DeveloperApiPanel({ me, providers, onOpenJwt, onNotify }) {
                       )}
                       {c.can_mint_tokens === true && (
                         <Chip size="small" color="warning" variant="outlined" label="Can Mint Tokens" />
+                      )}
+                      {c.can_read_admin_audit === true && (
+                        <Chip size="small" variant="outlined" label="Reads Audit Log" />
                       )}
                       {(c.allowed_ips || []).length > 0 && (
                         <Chip size="small" color="info" variant="outlined" label="IP-Restricted" />
