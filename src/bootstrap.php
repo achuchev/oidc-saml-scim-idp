@@ -2249,9 +2249,12 @@ function admin_console_csrf_token(): string
  * (admin_sessions_revoke_all()), 12 hours after the login, and after 30 minutes without a
  * request. A session without these records (made by an older version) is signed out. An
  * unreadable users.txt or session key denies access without ending the login.
+ * A client outside console_ip_allowlist gets the empty 404 before any session is touched
+ * (console_ip_allowlist_enforce()).
  */
 function current_user(): ?string
 {
+    console_ip_allowlist_enforce();
     session_resume_deferred();
     $user = $_SESSION["user"] ?? null;
     if (!is_string($user) || $user === "") {

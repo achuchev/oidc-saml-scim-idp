@@ -110,6 +110,8 @@ function admin_spa_csp(string $nonce, array $assets): string
  */
 function render_admin_spa(string $baseUrl = ""): never
 {
+    // Addresses outside console_ip_allowlist get the empty 404 instead of the console.
+    console_ip_allowlist_enforce();
     $basePath = rtrim((string) parse_url($baseUrl, PHP_URL_PATH), "/");
     $assets = admin_spa_script_assets();
     // S14-05: a script without a usable integrity value would run whatever the CDN serves,
@@ -4657,6 +4659,8 @@ const BLOCKED_REASON_META = {
   unknown_address: { label: 'Unknown address', color: 'warning' },
   config_error: { label: 'Configuration error', color: 'error' },
   check_failed: { label: 'Check failed', color: 'error' },
+  console_not_listed: { label: 'Console: not in console allowlist', color: 'error' },
+  console_config_error: { label: 'Console: allowlist configuration error', color: 'error' },
 };
 
 const BLOCKED_PAGE_SIZE = 100;
@@ -4922,6 +4926,8 @@ function BlockedStatusCard({ status }) {
         </Box>
       )}
 
+      <BlockedConsoleSection consoleStatus={blockedObject(status.console)} headingSx={headingSx} />
+
       <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>
         <strong>Log</strong>
         {log.file_name ? <> (<span className="mono">{blockedText(log.file_name)}</span>)</> : null}
@@ -4935,6 +4941,65 @@ function BlockedStatusCard({ status }) {
         Ranges are set in config.php (ip_allowlist) or the OIDC_IP_ALLOWLIST environment variable; this page cannot change them.
       </Typography>
     </Paper>
+  );
+}
+
+// The console allowlist (console_ip_allowlist): its state, ranges and problems. It limits only
+// the console page, sign-in and console-session calls; read-only like the rest of the card.
+function BlockedConsoleSection({ consoleStatus, headingSx }) {
+  const c = consoleStatus;
+  if (!Object.keys(c).length) return null;
+  const ranges = blockedList(c.ranges);
+  const problems = blockedList(c.problems);
+  const warnings = blockedList(c.warnings);
+  const viewer = blockedObject(c.viewer);
+  const matched = blockedObject(viewer.matched);
+  let chip = { label: 'Off', color: 'default' };
+  if (c.state === 'active') chip = { label: 'Enforcing', color: 'success' };
+  else if (c.state === 'deny_all') chip = { label: 'Refusing every address', color: 'error' };
+  const source = c.source === 'env' ? 'the OIDC_CONSOLE_IP_ALLOWLIST environment variable' : (c.source === 'config' ? 'console_ip_allowlist in config.php' : '');
+  return (
+    <Box sx={{ mt: 2.5 }}>
+      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap', mb: 0.5 }}>
+        <Typography variant="caption" color="text.secondary" sx={{ ...headingSx, mb: 0 }}>Console allowlist</Typography>
+        <Chip size="small" color={chip.color} label={chip.label} sx={{ fontWeight: 700, height: 22 }} />
+      </Box>
+      <Typography variant="body2" color="text.secondary">
+        {c.state === 'disabled'
+          ? 'The console is served wherever the IP allowlist above allows. Set console_ip_allowlist in config.php to limit the console page, sign-in and console sessions to some addresses; Admin API clients are not affected.'
+          : 'Only these addresses get the console page, sign-in and console sessions; others get the same empty 404 (logged as "Console: not in console allowlist"), also for API calls without Admin API client credentials. Requests with Admin API client credentials are not affected.'}
+      </Typography>
+      {warnings.map((w, i) => {
+        const item = blockedObject(w);
+        return (
+          <Alert key={i} severity={blockedSeverity(item.level)} sx={{ mt: 1 }}>
+            {blockedText(item.message) || blockedText(item.code)}
+          </Alert>
+        );
+      })}
+      {viewer.decision === 'allowed' && (
+        <Typography variant="body2" sx={{ color: 'success.main', fontWeight: 600, mt: 0.25 }}>
+          You are allowed by {blockedText(matched.cidr)}{blockedText(matched.label) ? ' (' + blockedText(matched.label) + ')' : ''}
+        </Typography>
+      )}
+      {ranges.length > 0 && (
+        <Box sx={{ display: 'flex', gap: 0.75, flexWrap: 'wrap', mt: 0.75 }}>
+          {ranges.map((r, i) => {
+            const range = blockedObject(r);
+            const label = blockedText(range.label);
+            return <Chip key={i} size="small" variant="outlined" className="mono" label={blockedText(range.cidr) + (label ? ' · ' + label : '')} sx={{ height: 22, fontSize: 11.5 }} />;
+          })}
+        </Box>
+      )}
+      {problems.length > 0 && (
+        <Box component="ul" sx={{ m: 0, mt: 0.75, pl: 2.5 }}>
+          {problems.map((p, i) => <Typography key={i} component="li" variant="body2" color="error.main">{blockedText(p)}</Typography>)}
+        </Box>
+      )}
+      {source && (
+        <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>Source: {source}.</Typography>
+      )}
+    </Box>
   );
 }
 

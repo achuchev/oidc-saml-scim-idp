@@ -20,8 +20,23 @@ function build_openapi_spec(string $baseUrl): array
     $sessionCookie = str_starts_with($serverUrl, "http://") ? "IDPSESSID" : "__Host-IDPSESSID";
     // Why the IP allowlist refuses a request: IP_ALLOWLIST_REASONS in src/ip_allowlist.php, written
     // out here because openapi.json is generated from this file alone. Keep the two lists equal.
-    $ipAllowlistReasons = ["not_listed", "bad_forwarded_for", "unknown_address", "config_error", "check_failed"];
-    $ipAllowlistReasonText = "`not_listed`: the address is outside every range; `bad_forwarded_for`: a trusted proxy sent a malformed X-Forwarded-For header (or more than 32 hops or 4096 bytes); `unknown_address`: the connection's address (REMOTE_ADDR) is not an IP address; `config_error`: no entry is usable, or config.php sets `ip_allowlist` but does not load; `check_failed`: the check itself failed";
+    $ipAllowlistReasons = [
+        "not_listed", "bad_forwarded_for", "unknown_address", "config_error", "check_failed",
+        "console_not_listed", "console_config_error",
+    ];
+    $ipAllowlistReasonText = "`not_listed`: the address is outside every range; `bad_forwarded_for`: a trusted proxy sent a malformed X-Forwarded-For header (or more than 32 hops or 4096 bytes); `unknown_address`: the connection's address (REMOTE_ADDR) is not an IP address; `config_error`: no entry is usable, or config.php sets `ip_allowlist` but does not load; `check_failed`: the check itself failed; `console_not_listed`: a console request (the console page, sign-in or a console-session call) from an address outside `console_ip_allowlist`, or whose address cannot be determined; `console_config_error`: `console_ip_allowlist` has no usable entry, or config.php sets it but does not load";
+    // One usable entry of ip_allowlist or console_ip_allowlist in the status document.
+    $ipAllowlistRangeItem = [
+        "type" => "object",
+        "properties" => [
+            "label" => ["type" => "string", "example" => "Office", "description" => "Name given in config.php; empty when none"],
+            "entry" => ["type" => "string", "example" => "203.0.113.0/24", "description" => "The entry as written"],
+            "cidr" => ["type" => "string", "example" => "203.0.113.0/24", "description" => "The block it matches, in canonical form"],
+            "family" => ["type" => "integer", "enum" => [4, 6]],
+            "prefix" => ["type" => "integer", "example" => 24],
+            "notes" => ["type" => "array", "items" => ["type" => "string"], "description" => "For example that host bits were set, or that the block matches every address"],
+        ],
+    ];
 
     return [
         "openapi" => "3.1.0",
@@ -1927,17 +1942,7 @@ function build_openapi_spec(string $baseUrl): array
                         "ranges" => [
                             "type" => "array",
                             "description" => "The usable entries",
-                            "items" => [
-                                "type" => "object",
-                                "properties" => [
-                                    "label" => ["type" => "string", "example" => "Office", "description" => "Name given in config.php; empty when none"],
-                                    "entry" => ["type" => "string", "example" => "203.0.113.0/24", "description" => "The entry as written"],
-                                    "cidr" => ["type" => "string", "example" => "203.0.113.0/24", "description" => "The block it matches, in canonical form"],
-                                    "family" => ["type" => "integer", "enum" => [4, 6]],
-                                    "prefix" => ["type" => "integer", "example" => 24],
-                                    "notes" => ["type" => "array", "items" => ["type" => "string"], "description" => "For example that host bits were set, or that the block matches every address"],
-                                ],
-                            ],
+                            "items" => $ipAllowlistRangeItem,
                         ],
                         "problems" => ["type" => "array", "items" => ["type" => "string"], "description" => "Entries that are ignored and why, or why every request is refused"],
                         "warnings" => [
@@ -1974,6 +1979,31 @@ function build_openapi_spec(string $baseUrl): array
                         ],
                         "trusted_proxies" => ["type" => "array", "items" => ["type" => "string"], "example" => ["10.0.0.5"], "description" => "The configured `trusted_proxies` entries: X-Forwarded-For is read only from these, and the allowlist ignores entries that cover every address (`/0`)"],
                         "log" => ['$ref' => "#/components/schemas/BlockedRequestsLog"],
+                        "console" => [
+                            "type" => "object",
+                            "description" => "The console allowlist (`console_ip_allowlist` in config.php or `OIDC_CONSOLE_IP_ALLOWLIST`): the console page, sign-in, sign-out and every request answered with a console session (also any `/api` request that presents no Admin API client credential) are limited to these ranges, with the same empty `404` for other addresses (recorded as `console_not_listed`). Requests that present an Admin API client credential are not affected (clients can have their own `allowed_ips`), nor are the public IdP endpoints.",
+                            "properties" => [
+                                "state" => ["type" => "string", "enum" => ["disabled", "active", "deny_all"], "description" => "`disabled`: the console is served wherever `ip_allowlist` allows; `active`: only to addresses inside `ranges`; `deny_all`: to no address"],
+                                "source" => ["type" => "string", "enum" => ["none", "env", "config"]],
+                                "ranges" => ["type" => "array", "items" => $ipAllowlistRangeItem],
+                                "problems" => ["type" => "array", "items" => ["type" => "string"]],
+                                "warnings" => ["type" => "array", "items" => ["type" => "object"], "description" => "Same shape as the top-level `warnings`: the ones about the console ranges and, while `ip_allowlist` is off, about resolving the client address"],
+                                "viewer" => [
+                                    "type" => "object",
+                                    "properties" => [
+                                        "decision" => ["type" => "string", "enum" => ["disabled", "allowed", "refused"]],
+                                        "reason" => ["type" => ["string", "null"], "enum" => ["console_not_listed", "console_config_error", null]],
+                                        "matched" => [
+                                            "type" => ["object", "null"],
+                                            "properties" => [
+                                                "label" => ["type" => "string"],
+                                                "cidr" => ["type" => "string"],
+                                            ],
+                                        ],
+                                    ],
+                                ],
+                            ],
+                        ],
                     ],
                 ],
                 "BlockedRequestsLog" => [

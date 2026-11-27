@@ -24,6 +24,16 @@ declare(strict_types=1);
  * Route-time code (status, viewer access) may also use json_response() and
  * auth_require_session_only(). This file defines only constants and functions.
  *
+ * Console allowlist (console_ip_allowlist, env OIDC_CONSOLE_IP_ALLOWLIST): a second, narrower
+ * list for the Administrator Console only, off until it has an entry. console_ip_allowlist_enforce()
+ * runs before the console page, POST /api/login and /api/logout, and every console-session
+ * check (current_user()), and refuses other addresses with the same empty 404, recorded as
+ * console_not_listed or console_config_error. An /api request that presents no Admin API
+ * client credential reaches current_user() and is refused too; requests with an Admin API
+ * client credential and the public IdP endpoints are not affected. The site-wide
+ * ip_allowlist still applies to every request first. While config.php is unreadable it is
+ * ignored as a whole, so console_ip_allowlist (unless set in the environment) does not apply.
+ *
  * Data shapes (shared with src/blocked_requests.php, src/routes_api.php and the console):
  *   $range    ["family" => 4|6, "net" => packed address (4 or 16 bytes, host bits zero),
  *              "bits" => int, "cidr" => canonical "net/bits", "normalized" => host bits were set]
@@ -51,7 +61,16 @@ const IP_ALLOWLIST_MAX_FORWARDED_HOPS = 32;
 const IP_ALLOWLIST_WARN_INTERVAL_SECONDS = 3600;
 // Why a request was refused. The gate, the blocked-request store, the API and the console use
 // exactly these values.
-const IP_ALLOWLIST_REASONS = ["not_listed", "bad_forwarded_for", "unknown_address", "config_error", "check_failed"];
+const IP_ALLOWLIST_REASONS = [
+    "not_listed",
+    "bad_forwarded_for",
+    "unknown_address",
+    "config_error",
+    "check_failed",
+    // Refused by console_ip_allowlist (the console only): not listed, or no usable entry.
+    "console_not_listed",
+    "console_config_error",
+];
 
 // ---------- Parsing and matching (pure; never DNS) ----------
 
@@ -154,10 +173,11 @@ function ip_allowlist_prefix_equal(string $a, string $b, int $bits): bool
  * duplicates are skipped, and entries beyond IP_ALLOWLIST_MAX_ENTRIES are ignored with one
  * problem. "configured" is false for null, false, "", [] and input with nothing in it (" ",
  * [""], ","); anything else, even an unusable value such as true or 0, counts as configured.
+ * $settingName names the setting in problem messages (console_ip_allowlist uses the same syntax).
  *
  * @return array{configured: bool, ranges: list<array>, problems: list<string>}
  */
-function ip_allowlist_parse_setting(mixed $raw): array
+function ip_allowlist_parse_setting(mixed $raw, string $settingName = "ip_allowlist"): array
 {
     if ($raw === null || $raw === false || $raw === "" || $raw === []) {
         return ["configured" => false, "ranges" => [], "problems" => []];
@@ -176,7 +196,8 @@ function ip_allowlist_parse_setting(mixed $raw): array
         &$given,
         &$full,
         &$seen,
-        $invalid
+        $invalid,
+        $settingName
     ): void {
         if ($full) {
             return;
@@ -191,7 +212,7 @@ function ip_allowlist_parse_setting(mixed $raw): array
             return;
         }
         if (count($ranges) >= IP_ALLOWLIST_MAX_ENTRIES) {
-            $problems[] = "ip_allowlist has more than " . IP_ALLOWLIST_MAX_ENTRIES . " entries: the rest are ignored";
+            $problems[] = $settingName . " has more than " . IP_ALLOWLIST_MAX_ENTRIES . " entries: the rest are ignored";
             $full = true;
             return;
         }
@@ -245,7 +266,7 @@ function ip_allowlist_parse_setting(mixed $raw): array
         }
     } else {
         $given = true;
-        $problems[] = "ip_allowlist must be a list or a string";
+        $problems[] = $settingName . " must be a list or a string";
     }
     return ["configured" => $given, "ranges" => $ranges, "problems" => $problems];
 }
@@ -643,6 +664,118 @@ function ip_allowlist_refuse(string $reason, array $client): never
     exit();
 }
 
+// ---------- Console allowlist ----------
+
+/**
+ * The console IP allowlist policy ($policy shape), computed once (static cache), from
+ * console_ip_allowlist (env OIDC_CONSOLE_IP_ALLOWLIST; same syntax as ip_allowlist, labels
+ * included). "disabled" while it is empty; "active" with at least one valid entry; "deny_all"
+ * when it is configured without a valid entry, or when config.php fails to load while
+ * OIDC_CONSOLE_IP_ALLOWLIST is unset and config.php names console_ip_allowlist outside
+ * comments. There is no report-only mode: report_only is always false.
+ */
+function console_ip_allowlist_policy(): array
+{
+    static $policy = null;
+    if (is_array($policy)) {
+        return $policy;
+    }
+    $loadError = null;
+    local_config($loadError);
+    $raw = config_value("console_ip_allowlist", "OIDC_CONSOLE_IP_ALLOWLIST");
+    $file = dirname(__DIR__) . DIRECTORY_SEPARATOR . "config.php";
+    if ($loadError === "unreadable") {
+        $configPhp = "unreadable";
+    } elseif ($loadError !== null) {
+        $configPhp = "failed";
+    } else {
+        $configPhp = is_file($file) ? "loaded" : "absent";
+    }
+    $result = [
+        "state" => "disabled",
+        "report_only" => false,
+        "source" => "none",
+        "config_php" => $configPhp,
+        "ranges" => [],
+        "problems" => [],
+    ];
+    if ($raw === null && $loadError === null) {
+        return $policy = $result;
+    }
+    if (env_string(["OIDC_CONSOLE_IP_ALLOWLIST"]) !== null) {
+        $source = "env";
+    } else {
+        $source = $raw !== null ? "config" : "none";
+    }
+    if (
+        $source === "none" &&
+        $configPhp === "failed" &&
+        ip_allowlist_config_mentions_key($file, "console_ip_allowlist")
+    ) {
+        $result["state"] = "deny_all";
+        $result["source"] = "config";
+        $result["problems"] = [
+            "config.php does not load and sets console_ip_allowlist: the console is refused to every address until it loads again (check it with php -l config.php)",
+        ];
+        return $policy = $result;
+    }
+    $parsed = ip_allowlist_parse_setting($raw, "console_ip_allowlist");
+    if ($parsed["configured"] && $parsed["ranges"] === []) {
+        $result["state"] = "deny_all";
+        $result["problems"] = array_merge($parsed["problems"], ["no usable entry: the console is refused to every address"]);
+    } elseif ($parsed["configured"]) {
+        $result["state"] = "active";
+        $result["ranges"] = $parsed["ranges"];
+        $result["problems"] = $parsed["problems"];
+    }
+    if ($result["state"] !== "disabled") {
+        $result["source"] = $source;
+    }
+    return $policy = $result;
+}
+
+/**
+ * The console IP allowlist check. Returns while console_ip_allowlist is off, in the CLI, and
+ * for a client whose address (ip_allowlist_client(), resolved strictly) is listed; otherwise
+ * answers with ip_allowlist_refuse(), the empty 404 of the site-wide allowlist, recorded in
+ * Blocked Requests as console_not_listed (also for an address that cannot be resolved) or
+ * console_config_error (no usable entry), and ends the request. Called before anything that
+ * serves the console or uses a console session: render_admin_spa(), POST /api/login and
+ * /api/logout, and current_user(). Requests with an Admin API client credential never reach
+ * it. Fails closed (check_failed).
+ */
+function console_ip_allowlist_enforce(): void
+{
+    static $passed = false;
+    if ($passed || PHP_SAPI === "cli") {
+        return;
+    }
+    $client = ["ip" => null, "bin" => null, "peer" => "", "via_proxy" => false, "problem" => null];
+    try {
+        $policy = console_ip_allowlist_policy();
+        if ($policy["state"] === "disabled") {
+            $passed = true;
+            return;
+        }
+        if ($policy["problems"] !== []) {
+            ip_allowlist_warn("console_config", "Console IP allowlist: console_ip_allowlist has " . count($policy["problems"]) .
+                " problem(s)" . ($policy["state"] === "deny_all" ? "; the console is refused to every address" : "") .
+                ". Run php index.php ip-allowlist to see them.");
+        }
+        $client = ip_allowlist_client();
+        $decision = ip_allowlist_decide($policy, $client);
+        if ($decision["decision"] !== "refused") {
+            $passed = true;
+            return;
+        }
+        $reason = $decision["reason"] === "config_error" ? "console_config_error" : "console_not_listed";
+    } catch (Throwable $e) {
+        $reason = "check_failed";
+        ip_allowlist_warn("console_error", "Console IP allowlist: the check failed (" . get_class($e) . ")");
+    }
+    ip_allowlist_refuse($reason, $client);
+}
+
 /**
  * The data directory, without creating anything: $CONFIG_DIR once bootstrap has resolved it,
  * otherwise (at gate time) the directory bootstrap_resolve_data_paths() would pick, if it
@@ -759,7 +892,9 @@ function ip_allowlist_status(string $configDir): array
         error_log("IdP: IP allowlist status: the blocked-request log statistics failed (" . get_class($e) . ": " . $e->getMessage() . ")");
         $log = ip_allowlist_log_placeholder(false);
     }
-    return ip_allowlist_status_document($policy, ip_allowlist_trusted_proxies(), $log, $viewer);
+    $doc = ip_allowlist_status_document($policy, ip_allowlist_trusted_proxies(), $log, $viewer);
+    $doc["console"] = ip_allowlist_console_status($client);
+    return $doc;
 }
 
 /**
@@ -769,8 +904,33 @@ function ip_allowlist_status(string $configDir): array
  */
 function ip_allowlist_status_document(array $policy, array $trusted, array $log, ?array $viewer): array
 {
+    $doc = [
+        "state" => $policy["state"],
+        "enforcing" => $policy["state"] !== "disabled" && !$policy["report_only"],
+        "report_only" => $policy["report_only"],
+        "source" => $policy["source"],
+        "config_php" => $policy["config_php"],
+        "ranges" => ip_allowlist_status_ranges($policy["ranges"]),
+        "problems" => array_values($policy["problems"]),
+        "warnings" => ip_allowlist_warnings($policy, $trusted, $log, $viewer),
+    ];
+    if ($viewer !== null) {
+        $doc["viewer"] = $viewer;
+    }
+    $proxies = [];
+    foreach (config_list("trusted_proxies", "OIDC_TRUSTED_PROXIES") as $entry) {
+        $proxies[] = sanitize_label($entry, 64);
+    }
+    $doc["trusted_proxies"] = $proxies;
+    $doc["log"] = $log;
+    return $doc;
+}
+
+/** The ranges ($item list) of a policy as the status document shows them. */
+function ip_allowlist_status_ranges(array $items): array
+{
     $ranges = [];
-    foreach ($policy["ranges"] as $item) {
+    foreach ($items as $item) {
         $range = $item["range"];
         $notes = [];
         if ($range["normalized"]) {
@@ -788,26 +948,56 @@ function ip_allowlist_status_document(array $policy, array $trusted, array $log,
             "notes" => $notes,
         ];
     }
-    $doc = [
+    return $ranges;
+}
+
+/**
+ * The "console" part of the status document (console_ip_allowlist): state, source, ranges,
+ * problems, warnings and, for the web request's $client (null in the CLI), the viewer's
+ * decision with the reason code Blocked Requests would record (console_not_listed or
+ * console_config_error). The warnings are those of ip_allowlist_warnings() that concern the
+ * console ranges (a trusted proxy inside them, a range that covers every address) and, while
+ * ip_allowlist is off (its own warnings then stop early), those about resolving the client
+ * address (trusted_proxies covering everything or invalid, X-Forwarded-For ignored or missing).
+ */
+function ip_allowlist_console_status(?array $client): array
+{
+    $policy = console_ip_allowlist_policy();
+    $out = [
         "state" => $policy["state"],
-        "enforcing" => $policy["state"] !== "disabled" && !$policy["report_only"],
-        "report_only" => $policy["report_only"],
         "source" => $policy["source"],
-        "config_php" => $policy["config_php"],
-        "ranges" => $ranges,
+        "ranges" => ip_allowlist_status_ranges($policy["ranges"]),
         "problems" => array_values($policy["problems"]),
-        "warnings" => ip_allowlist_warnings($policy, $trusted, $log, $viewer),
+        "warnings" => [],
     ];
-    if ($viewer !== null) {
-        $doc["viewer"] = $viewer;
+    $viewer = null;
+    if ($client !== null) {
+        $decision = ip_allowlist_decide($policy, $client);
+        $reason = $decision["reason"];
+        if ($reason !== null) {
+            $reason = $reason === "config_error" ? "console_config_error" : "console_not_listed";
+        }
+        $out["viewer"] = [
+            "decision" => $decision["decision"],
+            "reason" => $reason,
+            "matched" => $decision["matched"],
+        ];
+        $viewer = ["peer" => $client["peer"], "ip" => $client["ip"], "decision" => $decision["decision"]];
     }
-    $proxies = [];
-    foreach (config_list("trusted_proxies", "OIDC_TRUSTED_PROXIES") as $entry) {
-        $proxies[] = sanitize_label($entry, 64);
+    if ($policy["state"] !== "disabled") {
+        $codes = ["proxy_address_listed", "everything_range"];
+        if (ip_allowlist_policy()["state"] === "disabled") {
+            $codes = array_merge($codes, ["trusted_proxy_any", "trusted_proxy_invalid", "forwarded_for_ignored", "forwarded_for_missing"]);
+        }
+        $consolePolicy = ["state" => "active", "report_only" => false, "config_php" => "loaded"] + $policy;
+        $warnings = ip_allowlist_warnings($consolePolicy, ip_allowlist_trusted_proxies(), ["enabled" => true], $viewer);
+        foreach ($warnings as $warning) {
+            if (in_array($warning["code"], $codes, true)) {
+                $out["warnings"][] = $warning;
+            }
+        }
     }
-    $doc["trusted_proxies"] = $proxies;
-    $doc["log"] = $log;
-    return $doc;
+    return $out;
 }
 
 /**
@@ -1231,10 +1421,13 @@ function ip_allowlist_cli_status(bool $json, string $configDir): int
         $log = ip_allowlist_log_placeholder(false);
     }
     $doc = ip_allowlist_status_document($policy, ip_allowlist_trusted_proxies(), $log, null);
+    $doc["console"] = ip_allowlist_console_status(null);
     // Also 1 while config.php is ignored (it does not load or cannot be read): none of its
     // settings apply, and the scan for ip_allowlist in a broken file is a heuristic, so a
-    // pre-flight check must not pass whatever state it shows.
+    // pre-flight check must not pass whatever state it shows. The console allowlist counts
+    // the same way.
     $exit = $policy["problems"] !== [] || $policy["state"] === "deny_all" ||
+        $doc["console"]["problems"] !== [] || $doc["console"]["state"] === "deny_all" ||
         in_array($policy["config_php"], ["failed", "unreadable"], true) ? 1 : 0;
 
     if ($json) {
@@ -1286,6 +1479,22 @@ function ip_allowlist_cli_status(bool $json, string $configDir): int
     foreach ($doc["problems"] as $problem) {
         $lines[] = "  - " . $problem;
     }
+    $console = $doc["console"];
+    $lines[] = "Console allowlist: " . match ($console["state"]) {
+        "disabled" => "disabled (console_ip_allowlist is empty: the console is served wherever ip_allowlist allows)",
+        "active" => "enforcing",
+        default => "refusing the console to every address",
+    } . match ($console["source"]) {
+        "env" => " (source: OIDC_CONSOLE_IP_ALLOWLIST)",
+        "config" => " (source: config.php)",
+        default => "",
+    };
+    foreach ($console["ranges"] as $range) {
+        $lines[] = "  " . str_pad($range["cidr"], 44) . ($range["label"] !== "" ? $range["label"] : "-");
+    }
+    foreach ($console["problems"] as $problem) {
+        $lines[] = "  - problem: " . $problem;
+    }
     $lines[] = "Trusted proxies: " . ($doc["trusted_proxies"] === [] ? "none" : implode(", ", $doc["trusted_proxies"]));
     if ($logNote !== null) {
         $lines[] = "Log: " . $logNote;
@@ -1329,8 +1538,17 @@ function ip_allowlist_cli_check(string $ip): int
             true
         );
     }
+    // The console allowlist is reported on its own line; the exit code follows ip_allowlist.
+    $consoleDecision = ip_allowlist_decide(console_ip_allowlist_policy(), $client);
+    $consoleLine = "console: " . match ($consoleDecision["decision"]) {
+        "disabled" => "allowed (the console allowlist is off)",
+        "allowed" => "allowed by " . $consoleDecision["matched"]["cidr"] .
+            ($consoleDecision["matched"]["label"] !== "" ? " (" . $consoleDecision["matched"]["label"] . ")" : ""),
+        default => "refused: " . ($consoleDecision["reason"] === "config_error" ? "console_config_error" : "console_not_listed"),
+    };
     if ($decision["decision"] === "disabled") {
         ip_allowlist_cli_print("allowed: the IP allowlist is off");
+        ip_allowlist_cli_print($consoleLine);
         return 0;
     }
     if ($decision["decision"] === "allowed") {
@@ -1338,11 +1556,13 @@ function ip_allowlist_cli_check(string $ip): int
         ip_allowlist_cli_print(
             "allowed by " . $matched["cidr"] . ($matched["label"] !== "" ? " (" . $matched["label"] . ")" : "")
         );
+        ip_allowlist_cli_print($consoleLine);
         return 0;
     }
     ip_allowlist_cli_print(
         ($policy["report_only"] === true ? "would be refused (report-only): " : "refused: ") . (string) $decision["reason"]
     );
+    ip_allowlist_cli_print($consoleLine);
     return 1;
 }
 

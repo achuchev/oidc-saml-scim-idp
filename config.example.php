@@ -17,7 +17,8 @@
 // enable one only when you need it, and plan to turn it off again. The commented-out
 // lines show each setting at its default. Some settings are not compatibility flags:
 // max_passkeys_per_user and the sign-in rate limits are limits, admin_require_mfa is opt-in
-// hardening (true is the stricter behavior), and so is the IP allowlist (ip_allowlist).
+// hardening (true is the stricter behavior), and so are the IP allowlists (ip_allowlist,
+// console_ip_allowlist).
 // OIDC_SCIM_ENCRYPTION_KEY is read only from the environment.
 //
 // Upgrade notes for this release:
@@ -56,7 +57,8 @@
 //   meet a minimum policy (see allow_weak_directory_passwords); weaker ones get 400.
 // - New and off until configured: the IP allowlist (ip_allowlist below). Before turning it
 //   on, update the web-root .htaccess from htaccess.example: it now sends Apache's own
-//   403/404/413 answers and favicon.ico to index.php.
+//   403/404/413 answers and favicon.ico to index.php. Also new and off: console_ip_allowlist,
+//   which limits only the Administrator Console to some addresses.
 // - OAuth 2.1 defaults: code_challenge_method=plain (also what an omitted method means) is
 //   refused for every client, and response_type "token id_token" / "id_token token" (an
 //   access token from the authorization endpoint) is refused; "id_token" and "code id_token"
@@ -266,6 +268,28 @@ return [
     // for other administrators' providers), export and purge it. Admin API clients never have
     // access.
     // "ip_allowlist_admins" => [],
+
+    // console_ip_allowlist (env OIDC_CONSOLE_IP_ALLOWLIST; default: empty list, the check is off)
+    // A second, narrower list for the Administrator Console only: the console page, sign-in
+    // and sign-out (/api/login, /api/logout) and every request answered with a console
+    // session, which includes any /api request that presents no Admin API client credential.
+    // Other addresses get the same empty 404 as ip_allowlist refusals, recorded in Blocked
+    // Requests as "Console: not in console allowlist" (console_not_listed). Same syntax as
+    // ip_allowlist (names included) and the same client address rules (trusted_proxies,
+    // X-Forwarded-For); an address that cannot be determined is refused. ip_allowlist still
+    // applies to every request first, so an address must pass both to reach the console. The
+    // public IdP endpoints (sign-in for users, OIDC, SAML, SCIM) and requests that present an
+    // Admin API client credential are not limited by it; an Admin API client can have its own
+    // allowed_ips (set per client in the console or through the API). While this file is not
+    // readable by PHP it is ignored as a whole, and this list with it (set
+    // OIDC_CONSOLE_IP_ALLOWLIST in the environment if that must not happen). There is no
+    // report-only mode: check your address with
+    // php index.php ip-allowlist check <ip> (its "console:" line) before you set it. When no
+    // entry is valid, or this file stops loading while it sets console_ip_allowlist, the
+    // console is refused to every address. Locked out: fix or remove the list here (the
+    // command line is never filtered).
+    // Risk (empty): anyone who can reach the site can try to sign in to the console.
+    // "console_ip_allowlist" => [], // for example ["203.0.113.0/24" => "Office VPN"]
 
     // ---------- Protocol compatibility flags ----------
 

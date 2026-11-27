@@ -1009,6 +1009,8 @@ function handle_api_routes(
     // an authenticator app, or every administrator while admin_require_mfa is on, must also
     // send its current code as "otp"; the session starts only after that.
     if ($path === "/api/login" && $method === "POST") {
+        // Addresses outside console_ip_allowlist get the empty 404 (no sign-in attempt).
+        console_ip_allowlist_enforce();
         verify_request_csrf($origin, false);
         $input = read_json_body();
         $u = is_scalar($input["username"] ?? null) ? trim((string) $input["username"]) : "";
@@ -1159,6 +1161,8 @@ function handle_api_routes(
     }
 
     if ($path === "/api/logout" && $method === "POST") {
+        // Before the CSRF check, which reads the session.
+        console_ip_allowlist_enforce();
         verify_request_csrf($origin, true);
         $loggedOut = current_user();
         if ($loggedOut !== null) {
